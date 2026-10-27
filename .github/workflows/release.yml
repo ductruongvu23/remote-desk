@@ -70,8 +70,9 @@ jobs:
 
           **Dùng lần đầu**
           1. Trên PC: mở \`remote_host.exe\`, tạo tài khoản, cho phép qua Windows Firewall.
-          2. Trên iPhone (cùng Wi‑Fi): mở Remote Desk, chọn PC, đăng nhập. Lần sau app tự vào.
-          3. Muốn dùng ở ngoài: bật "Từ Internet" trên cửa sổ PC (cần mở cổng TCP 8443 trên router/modem).
+          2. Trên PC bấm "Ghép bằng mã QR", trên iPhone bấm "Quét mã QR trên PC" (hoặc dùng app Camera). Không cần IP hay mật khẩu; lần sau app tự vào, ở nhà hay ở ngoài.
+          3. Muốn dùng ở ngoài: bật "Từ Internet" trên cửa sổ PC (cần mở cổng TCP 8443 trên router/modem). Đặt "Tên miền" (DDNS, ví dụ DuckDNS miễn phí) để IP nhà đổi vẫn vào được, và để thêm PC từ xa khi không quét được mã: nhập tên miền + tài khoản.
+          4. Keymap có sẵn cho Minecraft, CS2, Valorant, PUBG, Genshin, Star Rail, ZZZ, Wuthering Waves, Roblox, GTA V, MOBA.
           EOF
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "Remote Desk $TAG" --notes-file notes.md \
             "RemoteDesk-iOS-$TAG-unsigned.ipa" "RemoteDesk-Windows-$TAG.zip"

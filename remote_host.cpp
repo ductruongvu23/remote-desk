@@ -513,7 +513,9 @@ static bool combo(string keys, bool down, std::vector<INPUT>& out) {
         else if (k == "MMB") v.push_back(mouse_in(down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP));
         else if (k == "WHEELUP" || k == "WHEELDOWN") { if (down) v.push_back(mouse_in(MOUSEEVENTF_WHEEL, 0, 0, k == "WHEELUP" ? 120 : -120)); }
         else {
-            WORD vk = VK.count(k) ? VK.at(k) : k.size() == 1 && isalnum((unsigned char)k[0]) ? (WORD)k[0] : 0;
+            int fn = k.size() >= 2 && k.size() <= 3 && k[0] == 'F' && isdigit((unsigned char)k[1]) ? atoi(k.c_str() + 1) : 0;
+            WORD vk = VK.count(k) ? VK.at(k) : k.size() == 1 && isalnum((unsigned char)k[0]) ? (WORD)k[0]
+                    : fn >= 1 && fn <= 24 ? (WORD)(VK_F1 + fn - 1) : 0;
             if (!vk) return false;
             // Gửi scan code như bàn phím thật: game DirectInput/raw input bỏ qua phím chỉ có mã VK
             UINT sc = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC_EX);
@@ -837,6 +839,183 @@ static bool ws_read(Tls& t, int& op, string& msg) {
     }
 }
 
+// ======================= Mã QR =======================
+// Bộ tạo mã QR nhỏ (ISO/IEC 18004: chế độ byte, mức sửa lỗi M, phiên bản 1–40), theo cách làm của qrcodegen (Nayuki).
+// Dùng cho mã ghép iPhone hiện trên cửa sổ PC.
+struct Qr {
+    int size = 0;
+    std::vector<char> m, fn;  // ô đen, ô thuộc mẫu cố định
+    bool at(int x, int y) const { return m[y * size + x]; }
+};
+static const uint8_t QR_ECC[41] = {0,  10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26,
+                                   26, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28};
+static const uint8_t QR_BLOCKS[41] = {0,  1,  1,  1,  2,  2,  4,  4,  4,  5,  5,  5,  8,  9,  9,  10, 10, 11, 13, 14, 16,
+                                      17, 17, 18, 20, 21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49};
+static int qr_raw(int v) {  // số ô chứa dữ liệu + mã sửa lỗi
+    int r = (16 * v + 128) * v + 64;
+    if (v >= 2) {
+        int n = v / 7 + 2;
+        r -= (25 * n - 10) * n - 55;
+        if (v >= 7) r -= 36;
+    }
+    return r;
+}
+static uint8_t gf_mul(uint8_t x, uint8_t y) {
+    int z = 0;
+    for (int i = 7; i >= 0; i--) z = ((z << 1) ^ ((z >> 7) * 0x11D)) ^ (((y >> i) & 1) * x);
+    return (uint8_t)z;
+}
+static std::vector<uint8_t> rs_ecc(const std::vector<uint8_t>& data, int deg) {
+    std::vector<uint8_t> div(deg), r(deg);
+    div[deg - 1] = 1;
+    for (int i = 0, root = 1; i < deg; i++, root = gf_mul((uint8_t)root, 2))
+        for (int j = 0; j < deg; j++) div[j] = gf_mul(div[j], (uint8_t)root) ^ (j + 1 < deg ? div[j + 1] : 0);
+    for (uint8_t b : data) {
+        uint8_t f = b ^ r[0];
+        r.erase(r.begin());
+        r.push_back(0);
+        for (int i = 0; i < deg; i++) r[i] ^= gf_mul(div[i], f);
+    }
+    return r;
+}
+// mask -1: tự chọn mẫu phủ ít điểm phạt nhất. Chuỗi quá dài (> 2331 byte) trả size 0.
+static Qr qr_make(const string& text, int mask = -1) {
+    int v = 1, n = (int)text.size();
+    for (; v <= 40 && 4 + (v < 10 ? 8 : 16) + 8 * n > (qr_raw(v) / 8 - QR_ECC[v] * QR_BLOCKS[v]) * 8; v++) {}
+    if (v > 40) return {};
+    int cap = qr_raw(v) / 8 - QR_ECC[v] * QR_BLOCKS[v];
+    std::vector<bool> bits;
+    auto put = [&](uint32_t val, int len) { for (int i = len - 1; i >= 0; i--) bits.push_back((val >> i) & 1); };
+    put(4, 4);
+    put(n, v < 10 ? 8 : 16);
+    for (unsigned char c : text) put(c, 8);
+    put(0, std::min(4, cap * 8 - (int)bits.size()));
+    put(0, (8 - bits.size() % 8) % 8);
+    std::vector<uint8_t> data;
+    for (size_t i = 0; i < bits.size(); i += 8) {
+        uint8_t b = 0;
+        for (int j = 0; j < 8; j++) b = b << 1 | bits[i + j];
+        data.push_back(b);
+    }
+    for (uint8_t pad = 0xEC; (int)data.size() < cap; pad ^= 0xEC ^ 0x11) data.push_back(pad);
+
+    // Chia khối, thêm mã sửa lỗi Reed–Solomon, xen kẽ các khối
+    int nb = QR_BLOCKS[v], ecl = QR_ECC[v], raw = qr_raw(v) / 8, nshort = nb - raw % nb, slen = raw / nb;
+    std::vector<std::vector<uint8_t>> blocks;
+    for (int i = 0, k = 0; i < nb; i++) {
+        int len = slen - ecl + (i < nshort ? 0 : 1);
+        std::vector<uint8_t> d(data.begin() + k, data.begin() + k + len);
+        k += len;
+        auto e = rs_ecc(d, ecl);
+        if (i < nshort) d.push_back(0);
+        d.insert(d.end(), e.begin(), e.end());
+        blocks.push_back(d);
+    }
+    std::vector<uint8_t> cw;
+    for (size_t i = 0; i < blocks[0].size(); i++)
+        for (int j = 0; j < nb; j++)
+            if (i != (size_t)(slen - ecl) || j >= nshort) cw.push_back(blocks[j][i]);
+
+    Qr q;
+    int s = q.size = v * 4 + 17;
+    q.m.assign(s * s, 0), q.fn.assign(s * s, 0);
+    auto set = [&](int x, int y, bool dark) { q.m[y * s + x] = dark, q.fn[y * s + x] = 1; };
+    for (int i = 0; i < s; i++) set(6, i, i % 2 == 0), set(i, 6, i % 2 == 0);  // vạch thời gian
+    std::pair<int, int> finders[] = {{3, 3}, {s - 4, 3}, {3, s - 4}};
+    for (auto [cx, cy] : finders)  // ba ô vuông định vị
+        for (int dy = -4; dy <= 4; dy++)
+            for (int dx = -4; dx <= 4; dx++) {
+                int d = std::max(abs(dx), abs(dy)), x = cx + dx, y = cy + dy;
+                if (x >= 0 && x < s && y >= 0 && y < s) set(x, y, d != 2 && d != 4);
+            }
+    if (v > 1) {  // ô căn chỉnh
+        int na = v / 7 + 2, step = (v * 8 + na * 3 + 5) / (na * 4 - 4) * 2;
+        std::vector<int> pos{6};
+        for (int i = 0; i < na - 1; i++) pos.insert(pos.begin() + 1, s - 7 - i * step);
+        for (int i = 0; i < na; i++)
+            for (int j = 0; j < na; j++) {
+                if ((i == 0 && j == 0) || (i == 0 && j == na - 1) || (i == na - 1 && j == 0)) continue;
+                for (int dy = -2; dy <= 2; dy++)
+                    for (int dx = -2; dx <= 2; dx++) set(pos[i] + dx, pos[j] + dy, std::max(abs(dx), abs(dy)) != 1);
+            }
+    }
+    auto format = [&](int msk) {  // mức M = 00, cộng mẫu phủ, BCH(15,5)
+        int d = msk, r = d;
+        for (int i = 0; i < 10; i++) r = (r << 1) ^ ((r >> 9) * 0x537);
+        int b = (d << 10 | r) ^ 0x5412;
+        auto bit = [b](int i) { return (b >> i) & 1; };
+        for (int i = 0; i <= 5; i++) set(8, i, bit(i));
+        set(8, 7, bit(6)), set(8, 8, bit(7)), set(7, 8, bit(8));
+        for (int i = 9; i < 15; i++) set(14 - i, 8, bit(i));
+        for (int i = 0; i < 8; i++) set(s - 1 - i, 8, bit(i));
+        for (int i = 8; i < 15; i++) set(8, s - 15 + i, bit(i));
+        set(8, s - 8, true);
+    };
+    format(0);
+    if (v >= 7) {  // thông tin phiên bản, BCH(18,6)
+        int r = v;
+        for (int i = 0; i < 12; i++) r = (r << 1) ^ ((r >> 11) * 0x1F25);
+        long b = (long)v << 12 | r;
+        for (int i = 0; i < 18; i++) {
+            bool bit = (b >> i) & 1;
+            set(s - 11 + i % 3, i / 3, bit), set(i / 3, s - 11 + i % 3, bit);
+        }
+    }
+    // Rải dữ liệu theo hình zíc zắc từ góc dưới phải, từng cặp cột
+    size_t bi = 0;
+    for (int right = s - 1; right >= 1; right -= 2) {
+        if (right == 6) right = 5;
+        for (int vert = 0; vert < s; vert++)
+            for (int j = 0; j < 2; j++) {
+                int x = right - j, y = ((right + 1) & 2) == 0 ? s - 1 - vert : vert;
+                if (!q.fn[y * s + x] && bi < cw.size() * 8) q.m[y * s + x] = (cw[bi >> 3] >> (7 - (bi & 7))) & 1, bi++;
+            }
+    }
+    auto apply = [&](int msk) {  // phủ mẫu: đảo ô dữ liệu theo công thức (đảo lần hai là bỏ phủ)
+        for (int y = 0; y < s; y++)
+            for (int x = 0; x < s; x++) {
+                bool inv = msk == 0 ? (x + y) % 2 == 0 : msk == 1 ? y % 2 == 0 : msk == 2 ? x % 3 == 0 : msk == 3 ? (x + y) % 3 == 0
+                         : msk == 4 ? (x / 3 + y / 2) % 2 == 0 : msk == 5 ? x * y % 2 + x * y % 3 == 0
+                         : msk == 6 ? (x * y % 2 + x * y % 3) % 2 == 0 : ((x + y) % 2 + x * y % 3) % 2 == 0;
+                if (inv && !q.fn[y * s + x]) q.m[y * s + x] ^= 1;
+            }
+    };
+    // Điểm phạt N1–N4 của chuẩn: hàng dài cùng màu, khối 2×2, mẫu giống ô định vị, lệch tỉ lệ đen/trắng
+    auto penalty = [&] {
+        long p = 0, dark = 0;
+        for (int pass = 0; pass < 2; pass++)
+            for (int a = 0; a < s; a++) {
+                int run = 0;
+                uint32_t win = 0;
+                for (int b = 0; b < s; b++) {
+                    bool c = pass ? q.at(a, b) : q.at(b, a);
+                    run = b && c == (pass ? q.at(a, b - 1) : q.at(b - 1, a)) ? run + 1 : 1;
+                    if (run == 5) p += 3; else if (run > 5) p++;
+                    win = (win << 1 | c) & 0x7FF;
+                    if (b >= 10 && (win == 0x5D0 || win == 0x05D)) p += 40;
+                }
+            }
+        for (int y = 0; y < s; y++)
+            for (int x = 0; x < s; x++) {
+                dark += q.at(x, y);
+                if (x && y && q.at(x, y) == q.at(x - 1, y) && q.at(x, y) == q.at(x, y - 1) && q.at(x, y) == q.at(x - 1, y - 1)) p += 3;
+            }
+        long total = (long)s * s;
+        return p + ((std::abs(dark * 20 - total * 10) + total - 1) / total - 1) * 10;
+    };
+    if (mask < 0) {
+        long best = -1;
+        for (int i = 0; i < 8; i++) {
+            apply(i), format(i);
+            long p = penalty();
+            if (best < 0 || p < best) best = p, mask = i;
+            apply(i);
+        }
+    }
+    apply(mask), format(mask);
+    return q;
+}
+
 // ======================= Khoá thiết bị và chống dò =======================
 // Đăng nhập đúng tài khoản thì PC cấp cho thiết bị đó một khoá 256-bit (iPhone cất trong Keychain).
 // Các lần sau thiết bị vào thẳng bằng khoá, không gửi lại mật khẩu. Đổi tài khoản hoặc "Đăng xuất hết" thì mọi khoá mất hiệu lực.
@@ -896,6 +1075,38 @@ static void forget_devices() {
 static size_t device_count() {
     std::lock_guard g(g_devmu);
     return g_devices.size();
+}
+
+// Ghép bằng mã QR: cửa sổ PC hiện mã chứa địa chỉ, chứng chỉ và một mã 128-bit dùng một lần (tối đa 10 phút, đóng hộp là
+// hết hiệu lực). iPhone quét là được cấp khoá thiết bị như đăng nhập đúng mật khẩu. Chỉ ai nhìn thấy màn hình PC mới có mã,
+// nên nhận từ mọi địa chỉ, kể cả Internet.
+static std::mutex g_pairmu;
+static string g_pair;  // mã đang hiện; rỗng = không ghép
+static ULONGLONG g_pair_until;
+static string pair_start() {
+    uint8_t r[16];
+    BCryptGenRandom(nullptr, r, sizeof r, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    std::lock_guard g(g_pairmu);
+    g_pair_until = GetTickCount64() + 10 * 60 * 1000;
+    return g_pair = hexs(r, sizeof r);
+}
+static void pair_stop() {
+    std::lock_guard g(g_pairmu);
+    g_pair.clear();
+}
+static bool pair_active() {
+    std::lock_guard g(g_pairmu);
+    return !g_pair.empty() && GetTickCount64() < g_pair_until;
+}
+// Đúng mã thì xoá ngay (dùng một lần). So hết chuỗi để thời gian trả lời không lộ đúng được bao nhiêu ký tự.
+static bool pair_ok(const string& code) {
+    std::lock_guard g(g_pairmu);
+    if (g_pair.empty() || GetTickCount64() >= g_pair_until || code.size() != g_pair.size()) return false;
+    int diff = 0;
+    for (size_t i = 0; i < code.size(); i++) diff |= code[i] ^ g_pair[i];
+    if (diff) return false;
+    g_pair.clear();
+    return true;
 }
 
 // Địa chỉ riêng: LAN, hotspot iPhone, Tailscale/CGNAT, máy này.
@@ -1168,11 +1379,11 @@ static void set_netstatus(const string& m) {
 }
 // IP công khai thật khi nhà có hai lớp router (UPnP chỉ thấy IP phía modem). Chỉ hỏi địa chỉ qua Cloudflare,
 // không cần tài khoản; hình và điều khiển không đi qua đây.
-static string public_ip() {
-    string ip, body;
+static string https_get(const wchar_t* host, const std::wstring& path) {
+    string body;
     HINTERNET ses = WinHttpOpen(L"RemoteDesk", WINHTTP_ACCESS_TYPE_NO_PROXY, nullptr, nullptr, 0);
-    HINTERNET con = ses ? WinHttpConnect(ses, L"1.1.1.1", INTERNET_DEFAULT_HTTPS_PORT, 0) : nullptr;
-    HINTERNET req = con ? WinHttpOpenRequest(con, L"GET", L"/cdn-cgi/trace", nullptr, nullptr, nullptr, WINHTTP_FLAG_SECURE) : nullptr;
+    HINTERNET con = ses ? WinHttpConnect(ses, host, INTERNET_DEFAULT_HTTPS_PORT, 0) : nullptr;
+    HINTERNET req = con ? WinHttpOpenRequest(con, L"GET", path.c_str(), nullptr, nullptr, nullptr, WINHTTP_FLAG_SECURE) : nullptr;
     if (req) WinHttpSetTimeouts(req, 3000, 3000, 3000, 3000);
     if (req && WinHttpSendRequest(req, nullptr, 0, nullptr, 0, 0, 0) && WinHttpReceiveResponse(req, nullptr)) {
         char b[1024];
@@ -1180,6 +1391,10 @@ static string public_ip() {
         while (WinHttpReadData(req, b, sizeof b, &n) && n) body.append(b, n);
     }
     for (HINTERNET h : {req, con, ses}) if (h) WinHttpCloseHandle(h);
+    return body;
+}
+static string public_ip() {
+    string ip, body = https_get(L"1.1.1.1", L"/cdn-cgi/trace");
     size_t p = body.find("\nip=");
     if (p != string::npos) ip = body.substr(p + 4, body.find('\n', p + 4) - p - 4);
     return ip.find_first_not_of("0123456789.") == string::npos ? ip : "";  // chỉ nhận IPv4
@@ -1204,6 +1419,46 @@ static bool port_open(const string& ip, int port) {
     closesocket(s);
     return ok;
 }
+// Tên miền riêng (DDNS): iPhone ở xa vào bằng tên cố định kể cả khi nhà đổi IP, không cần quét mã QR.
+// Tên *.duckdns.org có token thì PC tự báo IP mới cho DuckDNS (miễn phí; chỉ là DNS, hình và điều khiển vẫn đi thẳng).
+// Tên khác thì coi như modem/router tự cập nhật DDNS, PC chỉ gửi tên cho iPhone.
+static std::mutex g_ddnsmu;
+static string g_ddns, g_ddns_token, g_ddns_ip;  // g_ddns_ip: IP đã báo DuckDNS lần cuối
+static std::atomic<bool> g_net_kick{false};    // đổi tên miền: kiểm tra mạng ngay, không chờ hết 20 phút
+static string url_enc(const string& s);
+static std::wstring wide(const string& s);
+static string ddns_name() {
+    std::lock_guard g(g_ddnsmu);
+    return g_ddns;
+}
+// "nha" -> "nha.duckdns.org". Chỉ nhận chữ không dấu, số, dấu chấm, gạch ngang; sai trả "".
+static string ddns_norm(string h) {
+    h = trim(h);
+    std::transform(h.begin(), h.end(), h.begin(), ::tolower);
+    if (h.empty() || h.size() > 253 || h.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789.-") != string::npos ||
+        h.front() == '.' || h.back() == '.' || h.front() == '-' || h.find("..") != string::npos)
+        return "";
+    return h.find('.') == string::npos ? h + ".duckdns.org" : h;
+}
+static void ddns_update() {
+    string host, tok, last;
+    {
+        std::lock_guard g(g_ddnsmu);
+        host = g_ddns, tok = g_ddns_token, last = g_ddns_ip;
+    }
+    const string suf = ".duckdns.org";
+    if (tok.empty() || !host.ends_with(suf)) return;
+    string ip = public_ip();
+    if (ip.empty() || ip == last) return;
+    string r = https_get(L"www.duckdns.org", wide("/update?domains=" + url_enc(host.substr(0, host.size() - suf.size())) +
+                                                  "&token=" + url_enc(tok) + "&ip=" + ip));
+    if (r.starts_with("OK")) {
+        std::lock_guard g(g_ddnsmu);
+        g_ddns_ip = ip;
+    }
+    if (r.starts_with("OK")) logf("Tên miền %s đã trỏ về %s", host.c_str(), ip.c_str());
+    else logf("DuckDNS không nhận cập nhật cho %s (trả \"%s\"): kiểm tra tên và token", host.c_str(), r.substr(0, 16).c_str());
+}
 // Luồng nền: bật "Từ Internet" thì mở cổng trên router và gia hạn mỗi 20 phút; tắt thì đóng cổng.
 static void remote_loop() {
     auto next = Clock::now();
@@ -1225,9 +1480,10 @@ static void remote_loop() {
             logf("Đã đóng cổng trên router");
             was = false;
         }
-        if (!on || (was && Clock::now() < next)) continue;
+        if (!on || (was && Clock::now() < next && !g_net_kick.exchange(false))) continue;
         was = true;
         next = Clock::now() + std::chrono::minutes(1);  // lỗi thì một phút sau thử lại
+        ddns_update();  // trước cả UPnP: router không có UPnP vẫn chuyển cổng tay được
         Igd u;
         if (!igd_discover(u)) { set_netstatus("Router không bật UPnP: tự chuyển cổng TCP " + port + " về " + lan + " trên router."); continue; }
         if (!igd_map(u)) { set_netstatus("Router từ chối mở cổng " + port + " (UPnP)."); continue; }
@@ -1257,13 +1513,38 @@ static void remote_loop() {
         next = Clock::now() + std::chrono::minutes(reach ? 20 : 2);  // chưa thông thì 2 phút kiểm lại (chờ bạn sửa modem)
     }
 }
-// Địa chỉ gửi cho app: LAN, Tailscale, rồi IP công khai nếu đã mở cổng.
+// Địa chỉ gửi cho app: LAN, Tailscale, tên miền riêng, rồi IP công khai nếu đã mở cổng.
 static std::vector<string> client_addrs() {
     std::vector<string> v;
     for (auto& ip : reachable_ips()) v.push_back(ip + ":" + std::to_string(g_port));
+    string dn = ddns_name();
     std::lock_guard g(g_igdmu);
+    if (g_remote && !dn.empty()) v.push_back(dn + ":" + std::to_string(g_igd.ext_port ? g_igd.ext_port : g_port));
     if (g_igd.ext_port) v.push_back(g_igd.ext_ip + ":" + std::to_string(g_igd.ext_port));
     return v;
+}
+
+static string url_enc(const string& s) {  // khai báo trước ở phần tên miền
+    string o;
+    char b[4];
+    for (unsigned char c : s) {
+        if (isalnum(c) || strchr("-._~:,", c)) o += (char)c;
+        else snprintf(b, sizeof b, "%%%02X", c), o += b;
+    }
+    return o;
+}
+// remotedesk://pair?n=tên máy&a=ip[:cổng],...&c=mã dùng một lần&f=SHA-256 chứng chỉ. Cổng 8443 thì bỏ cho mã QR nhỏ hơn.
+static string pair_url(const string& code) {
+    string a, name = "PC";
+    for (auto ip : client_addrs()) {
+        if (ip.ends_with(":8443")) ip.resize(ip.size() - 5);
+        a += (a.empty() ? "" : ",") + ip;
+    }
+    wchar_t comp[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD n = ARRAYSIZE(comp);
+    if (GetComputerNameW(comp, &n)) name = utf8(comp);
+    string f = g_cert ? sha256_hex(string((const char*)g_cert->pbCertEncoded, g_cert->cbCertEncoded)) : "";
+    return "remotedesk://pair?n=" + url_enc(name) + "&a=" + url_enc(a) + "&c=" + code + (f.empty() ? "" : "&f=" + f);
 }
 
 // ======================= Phiên điều khiển =======================
@@ -1392,11 +1673,12 @@ struct Session {
         if (!t.send(r.data(), r.size())) return;
 
         int op;
-        string m, user, pass, tok, issued;
+        string m, user, pass, tok, issued, pair;
         if (!ws_read(t, op, m)) return;
         jstr(m, "user", user);
         jstr(m, "pass", pass);
         jstr(m, "token", tok);
+        jstr(m, "pair", pair);
         size_t hv = jfind(m, "hevc");
         client_hevc = hv != string::npos && m.compare(hv, 4, "true") == 0;
         bool local = is_private(peer);
@@ -1405,6 +1687,17 @@ struct Session {
             return;
         }
         bool ok = token_ok(tok);
+        if (!ok && !pair.empty()) {  // quét mã QR trên PC: mã dùng một lần thay cho mật khẩu
+            if (!pair_ok(pair)) {
+                auth_failed(peer);
+                Sleep(1000);
+                ws_send(t, 1, R"({"t":"badpair"})");
+                return;
+            }
+            ok = true;
+            issued = issue_token();
+            logf("Đã ghép iPhone bằng mã QR (%s): đã cấp khoá cho thiết bị mới", peer.c_str());
+        }
         if (!ok && !has_account()) {
             ws_send(t, 1, R"({"t":"noaccount"})");
             return;
@@ -1513,7 +1806,7 @@ static bool setup_tls(const std::wstring& cn, bool& created) {
 // ======================= Giao diện Windows: kiểu "white gallery" của Apple, có bản tối =======================
 // Nền trắng/#f5f5f7, chữ Ink, thẻ bo 28 px không bóng, nút pill viền mảnh, phân đoạn kiểu Apple.
 // Theo chế độ sáng/tối của Windows (App mode) và tự đổi khi người dùng đổi.
-enum { ID_ACCOUNT = 101, ID_KICK, ID_FORGET, ID_ACC_SAVE, ID_ACC_CANCEL, ID_ACC_EDIT = 120, ID_SEG = 200 };  // phân đoạn: ID_SEG + nhóm*10 + vị trí
+enum { ID_ACCOUNT = 101, ID_KICK, ID_FORGET, ID_ACC_SAVE, ID_ACC_CANCEL, ID_PAIR, ID_DDNS, ID_ACC_EDIT = 120, ID_SEG = 200 };  // phân đoạn: ID_SEG + nhóm*10 + vị trí
 static const int RES_W[] = {1280, 1920, 2560, 0}, FPS_V[] = {30, 60, 90, 120}, RATE_V[] = {5, 10, 20, 30, 50};
 static DNS_SERVICE_REGISTER_REQUEST g_reg{};
 
@@ -1534,6 +1827,11 @@ static void load_settings() {
     g_mbps = RATE_V[pick(RATE_V, 5, GetPrivateProfileIntW(L"stream", L"mbps", 20, ini.c_str()), 2)];
     g_hevc = GetPrivateProfileIntW(L"stream", L"hevc", 1, ini.c_str()) != 0;
     g_remote = GetPrivateProfileIntW(L"net", L"remote", 0, ini.c_str()) != 0;
+    wchar_t b[300];
+    GetPrivateProfileStringW(L"net", L"ddns", L"", b, 300, ini.c_str());
+    g_ddns = ddns_norm(utf8(b));
+    GetPrivateProfileStringW(L"net", L"ddns_token", L"", b, 300, ini.c_str());
+    g_ddns_token = trim(utf8(b));
 }
 static void save_settings() {
     auto ini = ini_path();
@@ -1542,6 +1840,9 @@ static void save_settings() {
     WritePrivateProfileStringW(L"stream", L"mbps", std::to_wstring(g_mbps).c_str(), ini.c_str());
     WritePrivateProfileStringW(L"stream", L"hevc", g_hevc ? L"1" : L"0", ini.c_str());
     WritePrivateProfileStringW(L"net", L"remote", g_remote ? L"1" : L"0", ini.c_str());
+    std::lock_guard g(g_ddnsmu);
+    WritePrivateProfileStringW(L"net", L"ddns", wide(g_ddns).c_str(), ini.c_str());
+    WritePrivateProfileStringW(L"net", L"ddns_token", wide(g_ddns_token).c_str(), ini.c_str());
 }
 
 // Quảng bá _remotedesk._tcp qua mDNS (API có sẵn từ Windows 10 1809) để app iPhone tự thấy PC.
@@ -1582,15 +1883,16 @@ enum Font { F_KICKER, F_LIVE, F_HEAD, F_BODY, F_SMALL, F_BIG, F_TITLE, F_COUNT }
 static HFONT g_font[F_COUNT];
 
 // Bố cục theo 96 DPI. Dải #f5f5f7 từ BAND_Y; hai thẻ trắng bo 28 px.
-constexpr int WIN_W = 520, WIN_H = 856, BAND_Y = 300, TRACK_X = 196, TRACK_W = 280, SEG_H = 30;
-static const RECT CARD_Q = {20, 320, 500, 540}, CARD_NET = {20, 556, 500, 686}, CARD_LOG = {20, 702, 500, 840};
+constexpr int WIN_W = 520, WIN_H = 896, BAND_Y = 300, TRACK_X = 196, TRACK_W = 280, SEG_H = 30;
+static const RECT CARD_Q = {20, 320, 500, 540}, CARD_NET = {20, 556, 500, 726}, CARD_LOG = {20, 742, 500, 880};
 static const int ROW_Y[4] = {384, 422, 460, 498}, NET_Y = 618;
 struct Ctl { HWND h; int x, y, w, h_; Font font; Role fg, bg; HWND parent; };  // fg = R_BLUE: nút chính tô xanh
 struct Seg { HWND h; int grp, idx, n, x, w, y; };  // rãnh phân đoạn của nhóm: x, w, y theo 96 DPI
 static std::vector<Ctl> g_ctls;
 static std::vector<Seg> g_segs;
-static HWND h_kicker, h_live, h_status, h_detail, h_acct, h_accbtn, h_kick, h_log, h_net;
-static HWND g_dlg, h_dlgerr;  // hộp tạo/đổi tài khoản
+static HWND h_kicker, h_live, h_status, h_detail, h_acct, h_accbtn, h_kick, h_log, h_net, h_ddns;
+static HWND g_dlg, h_dlgerr;  // hộp tạo/đổi tài khoản, tên miền, mã QR
+static void (*g_dlg_save)(HWND);  // nút Lưu / phím Enter của hộp có ô nhập
 static std::vector<HWND> g_dlg_edits;
 static int g_sel[5];
 static bool g_streaming;
@@ -1783,7 +2085,7 @@ static void refresh_status() {
     static uint64_t pf, pb;
     static Session* ps;
     bool acc = has_account();
-    std::wstring detail = acc ? L"Mở app Remote Desk trên iPhone rồi đăng nhập."
+    std::wstring detail = acc ? L"Mở Remote Desk trên iPhone, quét mã QR hoặc đăng nhập."
                               : L"Tạo tài khoản để iPhone đăng nhập vào PC này.";
     bool live;
     {
@@ -1819,6 +2121,8 @@ static void refresh_status() {
     }
     set_text(h_net, wide(net) + L"  ·  " + std::to_wstring(device_count()) + L" thiết bị đã đăng nhập");
     set_text(h_acct, acc ? wide(account_user()) : L"Chưa tạo");
+    string dn = ddns_name();
+    set_text(h_ddns, dn.empty() ? L"Chưa đặt" : wide(dn));
     set_text(h_accbtn, acc ? L"Đổi tài khoản" : L"Tạo tài khoản");
     for (auto& c : g_ctls)  // chưa có tài khoản: nút tạo tô xanh, là việc cần làm trước
         if (c.h == h_accbtn && (c.fg == R_BLUE) != !acc) c.fg = acc ? R_INK : R_BLUE, InvalidateRect(h_accbtn, nullptr, FALSE);
@@ -1911,7 +2215,7 @@ static LRESULT CALLBACK dlg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_COMMAND:
         if (HIWORD(wp) == EN_SETFOCUS || HIWORD(wp) == EN_KILLFOCUS) InvalidateRect(h, nullptr, FALSE);
-        else if (LOWORD(wp) == ID_ACC_SAVE || LOWORD(wp) == IDOK) account_save(h);  // IDOK: phím Enter
+        else if (LOWORD(wp) == ID_ACC_SAVE || LOWORD(wp) == IDOK) g_dlg_save(h);  // IDOK: phím Enter
         else if (LOWORD(wp) == ID_ACC_CANCEL || LOWORD(wp) == IDCANCEL) DestroyWindow(h);  // IDCANCEL: phím Esc
         return 0;
     case WM_DESTROY:
@@ -1922,27 +2226,43 @@ static LRESULT CALLBACK dlg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
-// Hộp riêng, khoá cửa sổ chính tới khi đóng (như hộp thoại hệ thống).
+// Hộp riêng (tài khoản, mã QR) đặt giữa cửa sổ chính; run_modal khoá cửa sổ chính tới khi hộp đóng (như hộp thoại hệ thống).
+static void open_dialog(const wchar_t* cls, WNDPROC proc, const wchar_t* title, int w, int h) {
+    HINSTANCE hi = GetModuleHandleW(nullptr);
+    WNDCLASSEXW wc{sizeof wc};
+    if (!GetClassInfoExW(hi, cls, &wc)) {
+        wc = {sizeof wc};
+        wc.lpfnWndProc = proc, wc.hInstance = hi, wc.lpszClassName = cls;
+        wc.hIcon = LoadIconW(hi, MAKEINTRESOURCEW(1)), wc.hCursor = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);
+        RegisterClassExW(&wc);
+    }
+    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+    g_dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, cls, title, style, 0, 0, 100, 100, g_hwnd, nullptr, hi, nullptr);
+    RECT rc{0, 0, S(w), S(h)}, o;
+    AdjustWindowRectExForDpi(&rc, style, FALSE, WS_EX_DLGMODALFRAME, GetDpiForWindow(g_hwnd));
+    GetWindowRect(g_hwnd, &o);
+    int ww = rc.right - rc.left, hh = rc.bottom - rc.top;
+    SetWindowPos(g_dlg, nullptr, o.left + (o.right - o.left - ww) / 2, o.top + S(90), ww, hh, SWP_NOZORDER);
+}
+static void run_modal(HWND focus) {
+    layout();
+    apply_theme();
+    ShowWindow(g_dlg, SW_SHOW);
+    SetFocus(focus);
+    EnableWindow(g_hwnd, FALSE);
+    MSG m{};
+    while (g_dlg && GetMessageW(&m, nullptr, 0, 0) > 0)
+        if (!IsDialogMessageW(g_dlg, &m)) TranslateMessage(&m), DispatchMessageW(&m);
+    if (m.message == WM_QUIT) PostQuitMessage((int)m.wParam);
+    EnableWindow(g_hwnd, TRUE);
+    SetForegroundWindow(g_hwnd);
+    refresh_status();
+}
 static void account_dialog() {
     if (g_dlg) return;
     bool change = has_account();
-    HINSTANCE hi = GetModuleHandleW(nullptr);
-    static bool registered = false;
-    if (!registered) {
-        WNDCLASSEXW wc{sizeof wc};
-        wc.lpfnWndProc = dlg_proc, wc.hInstance = hi, wc.lpszClassName = L"RemoteDeskAccount";
-        wc.hIcon = LoadIconW(hi, MAKEINTRESOURCEW(1)), wc.hCursor = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);
-        RegisterClassExW(&wc);
-        registered = true;
-    }
-    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
-    g_dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"RemoteDeskAccount", change ? L"Đổi tài khoản" : L"Tạo tài khoản", style,
-                            0, 0, 100, 100, g_hwnd, nullptr, hi, nullptr);
-    RECT rc{0, 0, S(DLG_W), S(DLG_H)}, o;
-    AdjustWindowRectExForDpi(&rc, style, FALSE, WS_EX_DLGMODALFRAME, GetDpiForWindow(g_hwnd));
-    GetWindowRect(g_hwnd, &o);
-    int w = rc.right - rc.left, hh = rc.bottom - rc.top;
-    SetWindowPos(g_dlg, nullptr, o.left + (o.right - o.left - w) / 2, o.top + S(90), w, hh, SWP_NOZORDER);
+    open_dialog(L"RemoteDeskAccount", dlg_proc, change ? L"Đổi tài khoản" : L"Tạo tài khoản", DLG_W, DLG_H);
+    g_dlg_save = account_save;
 
     label(change ? L"Đổi tài khoản" : L"Tạo tài khoản", 28, 22, 304, 44, F_HEAD, R_INK, R_CANVAS, SS_LEFT, g_dlg);
     label(change ? L"Mọi thiết bị đang đăng nhập sẽ phải đăng nhập lại bằng mật khẩu mới."
@@ -1960,18 +2280,114 @@ static void account_dialog() {
     h_dlgerr = label(L"", 28, 322, 304, 20, F_SMALL, R_ORANGE, R_CANVAS, SS_LEFT, g_dlg);
     ctl(L"BUTTON", L"Huỷ", WS_TABSTOP | BS_OWNERDRAW, 152, 354, 84, 34, ID_ACC_CANCEL, F_SMALL, R_INK, R_CANVAS, g_dlg);
     ctl(L"BUTTON", change ? L"Lưu" : L"Tạo", WS_TABSTOP | BS_OWNERDRAW, 246, 354, 86, 34, ID_ACC_SAVE, F_SMALL, R_BLUE, R_CANVAS, g_dlg);
-    layout();
-    apply_theme();
-    ShowWindow(g_dlg, SW_SHOW);
-    SetFocus(g_dlg_edits[change ? 1 : 0]);
-    EnableWindow(g_hwnd, FALSE);
-    MSG m{};
-    while (g_dlg && GetMessageW(&m, nullptr, 0, 0) > 0)
-        if (!IsDialogMessageW(g_dlg, &m)) TranslateMessage(&m), DispatchMessageW(&m);
-    if (m.message == WM_QUIT) PostQuitMessage((int)m.wParam);
-    EnableWindow(g_hwnd, TRUE);
-    SetForegroundWindow(g_hwnd);
-    refresh_status();
+    run_modal(g_dlg_edits[change ? 1 : 0]);
+}
+
+// ---- Hộp tên miền riêng ----
+constexpr int DDNS_H = 380;
+static void ddns_save(HWND dlg) {
+    string raw = trim(edit_text(g_dlg_edits[0])), host = ddns_norm(raw), tok = trim(edit_text(g_dlg_edits[1]));
+    const wchar_t* err = !raw.empty() && host.empty() ? L"Tên miền chỉ gồm chữ không dấu, số, dấu chấm và gạch ngang."
+                         : !tok.empty() && !host.ends_with(".duckdns.org") ? L"Token chỉ dùng cho tên miền .duckdns.org."
+                         : nullptr;
+    if (err) return (void)SetWindowTextW(h_dlgerr, err);
+    {
+        std::lock_guard g(g_ddnsmu);
+        g_ddns = host, g_ddns_token = tok, g_ddns_ip.clear();
+    }
+    save_settings();
+    g_net_kick = true;
+    if (host.empty()) logf("Đã bỏ tên miền riêng");
+    else logf("Tên miền riêng: %s%s", host.c_str(), g_remote ? "" : ". Bật \"Từ Internet\" để iPhone ở xa dùng được");
+    DestroyWindow(dlg);
+}
+static void ddns_dialog() {
+    if (g_dlg) return;
+    open_dialog(L"RemoteDeskAccount", dlg_proc, L"Tên miền riêng", DLG_W, DDNS_H);
+    g_dlg_save = ddns_save;
+    label(L"Tên miền riêng", 28, 22, 304, 44, F_HEAD, R_INK, R_CANVAS, SS_LEFT, g_dlg);
+    label(L"iPhone ở xa vào bằng tên này cùng tài khoản, kể cả khi nhà đổi IP. Tạo miễn phí ở duckdns.org rồi chép token vào "
+          L"đây. Modem đã tự cập nhật DDNS thì chỉ cần điền tên.",
+          28, 70, 304, 72, F_SMALL, R_SLATE, R_CANVAS, SS_LEFT, g_dlg);
+    const wchar_t* names[] = {L"Tên miền, ví dụ nhacuatoi.duckdns.org", L"Token DuckDNS (bỏ trống nếu modem tự cập nhật)"};
+    for (int i = 0; i < 2; i++) {
+        int y = 150 + i * 70;
+        label(names[i], 28, y, 304, 18, F_SMALL, R_SLATE, R_CANVAS, SS_LEFT, g_dlg);
+        g_dlg_edits.push_back(ctl(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL | (i ? ES_PASSWORD : 0), 44, y + 30, 272, 22,
+                                  ID_ACC_EDIT + i, F_BODY, R_INK, R_CANVAS, g_dlg));
+        SendMessageW(g_dlg_edits.back(), EM_LIMITTEXT, 253, 0);
+    }
+    {
+        std::lock_guard g(g_ddnsmu);
+        SetWindowTextW(g_dlg_edits[0], wide(g_ddns).c_str());
+        SetWindowTextW(g_dlg_edits[1], wide(g_ddns_token).c_str());
+    }
+    h_dlgerr = label(L"", 28, 290, 304, 20, F_SMALL, R_ORANGE, R_CANVAS, SS_LEFT, g_dlg);
+    ctl(L"BUTTON", L"Huỷ", WS_TABSTOP | BS_OWNERDRAW, 152, 326, 84, 34, ID_ACC_CANCEL, F_SMALL, R_INK, R_CANVAS, g_dlg);
+    ctl(L"BUTTON", L"Lưu", WS_TABSTOP | BS_OWNERDRAW, 246, 326, 86, 34, ID_ACC_SAVE, F_SMALL, R_BLUE, R_CANVAS, g_dlg);
+    run_modal(g_dlg_edits[0]);
+}
+
+// ---- Hộp mã QR ghép iPhone ----
+constexpr int PAIR_H = 500, QR_X = 60, QR_Y = 128, QR_BOX = 240;
+static Qr g_qr;
+static LRESULT CALLBACK qr_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_ERASEBKGND: return 1;
+    case WM_PAINT:  // ô đen trên thẻ trắng cả khi giao diện tối (camera cần nền sáng), chừa lề 4 ô theo chuẩn
+        buffered_paint(h, [](HDC m, RECT) {
+            int box = S(QR_BOX), x0 = S(QR_X), y0 = S(QR_Y), cell = box / (g_qr.size + 8), off = (box - cell * g_qr.size) / 2;
+            {
+                Gdiplus::Graphics g(m);
+                g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+                rrect(g, (float)x0, (float)y0, (float)box, (float)box, (float)S(20), RGB(255, 255, 255), P[R_HAIR]);
+            }
+            for (int y = 0; y < g_qr.size; y++)
+                for (int x = 0; x < g_qr.size; x++)
+                    if (g_qr.at(x, y)) {
+                        RECT r{x0 + off + x * cell, y0 + off + y * cell, x0 + off + (x + 1) * cell, y0 + off + (y + 1) * cell};
+                        FillRect(m, &r, (HBRUSH)GetStockObject(BLACK_BRUSH));
+                    }
+        });
+        return 0;
+    case WM_TIMER:  // iPhone đã dùng mã, hoặc hết 10 phút: tự đóng
+        if (!pair_active()) DestroyWindow(h);
+        return 0;
+    case WM_DRAWITEM: draw_item((DRAWITEMSTRUCT*)lp); return TRUE;
+    case WM_CTLCOLORSTATIC:
+        if (LRESULT r = ctl_color(wp, lp)) return r;
+        break;
+    case WM_COMMAND:
+        if (LOWORD(wp) == ID_ACC_CANCEL || LOWORD(wp) == IDOK || LOWORD(wp) == IDCANCEL) DestroyWindow(h);  // Enter, Esc
+        return 0;
+    case WM_DESTROY:
+        pair_stop();  // đóng hộp là mã hết hiệu lực
+        std::erase_if(g_ctls, [h](const Ctl& c) { return c.parent == h; });
+        g_dlg = nullptr;
+        return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+static void pair_dialog() {
+    if (g_dlg) return;
+    g_qr = qr_make(pair_url(pair_start()));
+    open_dialog(L"RemoteDeskPair", qr_proc, L"Ghép iPhone", DLG_W, PAIR_H);
+    label(L"Ghép iPhone", 28, 22, 304, 44, F_HEAD, R_INK, R_CANVAS, SS_LEFT, g_dlg);
+    label(L"Trên iPhone, mở Remote Desk và bấm \"Quét mã QR trên PC\", hoặc quét bằng app Camera. Không cần nhập IP hay mật khẩu.",
+          28, 70, 304, 54, F_SMALL, R_SLATE, R_CANVAS, SS_LEFT, g_dlg);
+    bool pub = false;
+    std::wstring ips;
+    for (auto& a : client_addrs()) {
+        string ip = a.substr(0, a.rfind(':'));
+        pub |= !is_private(ip);
+        ips += (ips.empty() ? L"" : L", ") + wide(ip);
+    }
+    std::wstring note = L"Mã dùng một lần, hết hạn sau 10 phút. Địa chỉ trong mã: " + ips +
+                        (pub ? L"." : L". Muốn dùng ở ngoài thì bật \"Từ Internet\" trước rồi mở lại mã.");
+    label(note.c_str(), 28, 384, 304, 54, F_SMALL, R_SLATE, R_CANVAS, SS_LEFT, g_dlg);
+    HWND done = ctl(L"BUTTON", L"Xong", WS_TABSTOP | BS_OWNERDRAW, 246, 450, 86, 34, ID_ACC_CANCEL, F_SMALL, R_BLUE, R_CANVAS, g_dlg);
+    SetTimer(g_dlg, 1, 1000, nullptr);
+    run_modal(done);
 }
 
 static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1987,6 +2403,10 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND:
         if (LOWORD(wp) == ID_ACCOUNT) {
             account_dialog();
+        } else if (LOWORD(wp) == ID_PAIR) {
+            pair_dialog();
+        } else if (LOWORD(wp) == ID_DDNS) {
+            ddns_dialog();
         } else if (LOWORD(wp) == ID_FORGET) {
             forget_devices();
             logf("Đã đăng xuất mọi thiết bị: lần sau phải nhập mật khẩu");
@@ -2049,6 +2469,7 @@ static void run_ui() {
     h_acct = label(L"", 38, 170, 440, 60, F_BIG, R_INK, R_CANVAS, SS_LEFT | SS_ENDELLIPSIS);
     h_accbtn = ctl(L"BUTTON", L"", WS_TABSTOP | BS_OWNERDRAW, 40, 246, 128, 32, ID_ACCOUNT, F_SMALL, R_INK, R_CANVAS);
     h_kick = ctl(L"BUTTON", L"Ngắt kết nối", WS_TABSTOP | BS_OWNERDRAW, 178, 246, 116, 32, ID_KICK, F_SMALL, R_INK, R_CANVAS);
+    ctl(L"BUTTON", L"Ghép bằng mã QR", WS_TABSTOP | BS_OWNERDRAW, 304, 246, 150, 32, ID_PAIR, F_SMALL, R_BLUE, R_CANVAS);
     EnableWindow(h_kick, FALSE);
 
     // Dải #f5f5f7: thẻ chất lượng hình với ba nhóm phân đoạn, thẻ nhật ký
@@ -2062,10 +2483,13 @@ static void run_ui() {
     label(L"Truy cập từ xa", 48, 576, 400, 26, F_TITLE, R_INK, R_CARD);
     segmented(4, L"Từ Internet", {L"Tắt", L"Bật"}, NET_Y, TRACK_X, 140);
     ctl(L"BUTTON", L"Đăng xuất hết", WS_TABSTOP | BS_OWNERDRAW, 352, NET_Y, 124, 30, ID_FORGET, F_SMALL, R_INK, R_CARD);
-    h_net = label(L"", 48, 656, 424, 20, F_SMALL, R_SLATE, R_CARD, SS_LEFT | SS_ENDELLIPSIS);
+    label(L"Tên miền", 48, 662, 140, 20, F_SMALL, R_SLATE, R_CARD);
+    h_ddns = label(L"", 196, 662, 148, 20, F_SMALL, R_INK, R_CARD, SS_LEFT | SS_ENDELLIPSIS);
+    ctl(L"BUTTON", L"Đặt tên miền", WS_TABSTOP | BS_OWNERDRAW, 352, 656, 124, 30, ID_DDNS, F_SMALL, R_INK, R_CARD);
+    h_net = label(L"", 48, 698, 424, 20, F_SMALL, R_SLATE, R_CARD, SS_LEFT | SS_ENDELLIPSIS);
 
-    label(L"Nhật ký", 48, 722, 400, 26, F_TITLE, R_INK, R_CARD);
-    h_log = ctl(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 48, 754, 424, 74, 0, F_SMALL, R_SLATE, R_CARD);
+    label(L"Nhật ký", 48, 762, 400, 26, F_TITLE, R_INK, R_CARD);
+    h_log = ctl(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 48, 794, 424, 74, 0, F_SMALL, R_SLATE, R_CARD);
 
     layout();
     apply_theme();
@@ -2098,6 +2522,9 @@ static int self_test() {
     CHECK(combo("CTRL+SHIFT+ESC", false, in) && in[0].ki.wVk == 27 && in[2].ki.wVk == 17 && (in[0].ki.dwFlags & KEYEVENTF_KEYUP));
     in.clear();
     CHECK(combo("UP", true, in) && (in[0].ki.dwFlags & KEYEVENTF_EXTENDEDKEY) && !combo("FOO", true, in));
+    in.clear();
+    CHECK(combo("F5", true, in) && in[0].ki.wVk == VK_F5 && combo("f24", true, in) && in[1].ki.wVk == VK_F24 && !combo("F25", true, in) &&
+          !combo("F0", true, in));
     in.clear();
     CHECK(combo("W", true, in) && (in[0].ki.dwFlags & KEYEVENTF_SCANCODE) && in[0].ki.wScan == 0x11);  // scan code cho game
     in.clear();
@@ -2145,9 +2572,30 @@ static int self_test() {
         string tk = issue_token();
         load_devices();  // đọc lại từ file
         CHECK(tk.size() == 64 && token_ok(tk) && !token_ok(string(64, '0')) && !token_ok("abc"));
+        // mã QR: dùng một lần, sai thì không mất mã, đóng hộp là hết hiệu lực
+        string pc = pair_start();
+        CHECK(pc.size() == 32 && pair_active() && !pair_ok("") && !pair_ok(string(32, '0')) && pair_ok(pc) && !pair_ok(pc) && !pair_active());
+        pc = pair_start();
+        pair_stop();
+        CHECK(!pair_ok(pc));
         forget_devices();
         CHECK(!token_ok(tk) && device_count() == 0);
         DeleteFileW(g_devfile.c_str());
+    }
+    // Mã QR: khớp đúng từng ô với thư viện qrcode của Python (phiên bản 1, mask 2); link ghép mã hoá đúng
+    {
+        static const uint32_t want[21] = {0x1FC07F, 0x104341, 0x17545D, 0x17575D, 0x175B5D, 0x105141, 0x1FD57F,
+                                          0x001F00, 0x17CD7C, 0x0901BD, 0x1BFE8E, 0x1A28AD, 0x0DCEC0, 0x00172A,
+                                          0x1FC5CE, 0x10538D, 0x175941, 0x175578, 0x175AC8, 0x10482C, 0x1FDE0A};
+        Qr q = qr_make("RemoteDesk", 2);
+        bool same = q.size == 21;
+        for (int y = 0; same && y < 21; y++)
+            for (int x = 0; x < 21; x++) same &= q.at(x, y) == (bool)((want[y] >> (20 - x)) & 1);
+        CHECK(same);
+        CHECK(qr_make(string(200, 'a')).size == 57 && qr_make(string(2332, 'a')).size == 0);
+        CHECK(url_enc("DESKTOP-1 é&=") == "DESKTOP-1%20%C3%A9%26%3D" && url_enc("1.2.3.4:9,5.6.7.8") == "1.2.3.4:9,5.6.7.8");
+        CHECK(ddns_norm(" Nha ") == "nha.duckdns.org" && ddns_norm("pc.example.vn") == "pc.example.vn" && ddns_norm("a b").empty() &&
+              ddns_norm("a..b").empty() && ddns_norm(".x").empty() && ddns_norm("nhà").empty() && ddns_norm("").empty());
     }
     CHECK(is_private("192.168.0.103") && is_private("100.99.1.1") && is_private("172.20.10.2") && is_private("127.0.0.1"));
     CHECK(!is_private("14.162.162.13") && !is_private("172.32.0.1") && !is_private("100.128.0.1"));

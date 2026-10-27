@@ -20,6 +20,7 @@ final class StreamUIView: UIView, UIKeyInput {
     private var latched: Set<Int> = []                     // nút bật/tắt đang bật
     private var turbo: [UITouch: Timer] = [:]              // nút liên thanh đang giữ
     private var pad: Set<UITouch> = []
+    private var directDown: String?                        // nút chuột đang giữ do chạm nền kiểu trực tiếp
     private var padStart = 0.0, padMax = 0, padMoved: CGFloat = 0, padLast = CGPoint.zero
     private var mouseAcc = CGPoint.zero, wheelAcc = CGPoint.zero
     private let motion = CMMotionManager()
@@ -88,8 +89,8 @@ final class StreamUIView: UIView, UIKeyInput {
     }
 
     private func send(_ m: [String: Any]) { session?.send(m) }
-    private func keyDown(_ k: String) { send(["t": "k", "keys": k, "d": 1]) }
-    private func keyUp(_ k: String) { send(["t": "k", "keys": k, "d": 0]) }
+    private func keyDown(_ k: String) { if !k.isEmpty { send(["t": "k", "keys": k, "d": 1]) } }
+    private func keyUp(_ k: String) { if !k.isEmpty { send(["t": "k", "keys": k, "d": 0]) } }
     private func setPressed(_ i: Int, _ on: Bool) {
         caps[i].pressed = on
         caps[i].alpha = on || editing ? 1 : keyAlpha  // nút mờ vẫn hiện rõ lúc đang bấm
@@ -103,6 +104,8 @@ final class StreamUIView: UIView, UIKeyInput {
         turbo.values.forEach { $0.invalidate() }
         for held in stickHeld.values { held.forEach(keyUp) }
         for i in latched where i < keys.count { keyUp(keys[i].keys) }
+        if let b = directDown { keyUp(b) }
+        directDown = nil
         turbo.removeAll()
         stickHeld.removeAll()
         latched.removeAll()
@@ -159,7 +162,7 @@ final class StreamUIView: UIView, UIKeyInput {
                     look.y += p.y - q.y
                 }
             } else if pad.contains(t) {
-                if session?.mode == .look {
+                if session?.mode == .look && !isDirect {
                     look.x += p.x - q.x
                     look.y += p.y - q.y
                 } else {
@@ -260,15 +263,20 @@ final class StreamUIView: UIView, UIKeyInput {
         return CGPoint(x: ps.map(\.x).reduce(0, +) / CGFloat(ps.count), y: ps.map(\.y).reduce(0, +) / CGFloat(ps.count))
     }
     private var directButton: String { session?.mode == .directRight ? "RMB" : "LMB" }
-    private var isDirect: Bool { session?.mode == .direct || session?.mode == .directRight }
+    /// Nút "Chuột" đang bật hoặc đang giữ: game hiện con trỏ (túi đồ, bản đồ, giữ ALT) nên chạm nền phải bấm đúng chỗ.
+    private var cursorOn: Bool {
+        latched.union(keyTouches.values).contains { $0 < keys.count && keys[$0].cursor == true }
+    }
+    private var isDirect: Bool { session?.mode == .direct || session?.mode == .directRight || cursorOn }
 
     private func padBegan(_ t: UITouch) {
         if pad.isEmpty { padStart = CACurrentMediaTime(); padMax = 0; padMoved = 0 }
         pad.insert(t)
         padMax = max(padMax, pad.count)
         padLast = padCenter
-        if isDirect && pad.count == 1 {
+        if isDirect && pad.count == 1 && directDown == nil {
             sendAbsolute(t.location(in: self))
+            directDown = directButton
             keyDown(directButton)
         }
     }
@@ -296,15 +304,12 @@ final class StreamUIView: UIView, UIKeyInput {
     private func padEnded(_ t: UITouch) {
         pad.remove(t)
         padLast = padCenter
-        switch session?.mode ?? .trackpad {
-        case .direct, .directRight:
-            if pad.isEmpty { keyUp(directButton) }
-        case .look:
-            break
-        case .trackpad:
-            if pad.isEmpty && padMoved < 10 && CACurrentMediaTime() - padStart < 0.3 {  // chạm nhanh: 1 ngón trái, 2 ngón phải
-                session?.tapKey(padMax >= 2 ? "RMB" : "LMB")
-            }
+        guard pad.isEmpty else { return }
+        if let b = directDown {
+            keyUp(b)
+            directDown = nil
+        } else if session?.mode == .trackpad && padMoved < 10 && CACurrentMediaTime() - padStart < 0.3 {  // chạm nhanh: 1 ngón trái, 2 ngón phải
+            session?.tapKey(padMax >= 2 ? "RMB" : "LMB")
         }
     }
 
@@ -474,13 +479,15 @@ struct StreamView: View {
             Color.black.ignoresSafeArea()
             StreamCanvas(session: session).ignoresSafeArea()
             VStack {
-                toolbar
+                toolbar.opacity(1 - session.barFade)
                 Spacer()
-                if session.showStats && session.state == .streaming {
+                if session.stats != .off && session.state == .streaming {
                     HStack {
-                        LinkBadge(link: session.link)
+                        LinkBadge(link: session.link, compact: session.stats == .compact)
                         Spacer()
                     }
+                    .opacity(1 - session.barFade)
+                    .allowsHitTesting(false)  // chạm xuyên xuống nút/nền bên dưới
                 }
             }
             .padding(.horizontal)
@@ -515,8 +522,19 @@ struct StreamView: View {
         }
     }
 
-    private var toolbar: some View {
+    @ViewBuilder private var toolbar: some View {
+        if session.barCollapsed && !session.editing {
+            barButton("Mở thanh công cụ", "chevron.down") { session.barCollapsed = false }
+                .padding(4)
+                .overlayTrack(22)
+        } else {
+            fullToolbar
+        }
+    }
+
+    private var fullToolbar: some View {
         HStack(spacing: 4) {
+            barButton("Thu gọn thanh công cụ", "chevron.up") { session.barCollapsed = true }
             Menu {
                 Picker("Hồ sơ keymap", selection: $session.activeID) {
                     ForEach(session.profiles) { Text($0.name).tag($0.id) }
@@ -590,15 +608,18 @@ struct StreamView: View {
 /// Dải thông số: chấm màu theo ping, khung/s, ping, băng thông, độ phân giải, loại mạng.
 struct LinkBadge: View {
     let link: LinkStats
+    var compact = false
 
     var body: some View {
         HStack(spacing: 10) {
             Circle().fill([Color.green, .yellow, .red][link.quality]).frame(width: 8, height: 8)
             Text("\(link.fps) khung/s")
             Text("ping \(link.ping) ms")
-            Text(String(format: "%.1f Mbps", link.mbps))
-            if !link.size.isEmpty { Text(link.size) }
-            Text(link.network)
+            if !compact {
+                Text(String(format: "%.1f Mbps", link.mbps))
+                if !link.size.isEmpty { Text(link.size) }
+                Text(link.network)
+            }
         }
         .font(.text(12, .medium).monospacedDigit())
         .tracking(-0.12)
@@ -652,6 +673,21 @@ struct SettingsSheet: View {
                 .listRowBackground(Theme.card)
 
                 Section {
+                    Picker("Thông số", selection: $session.stats) {
+                        ForEach(StatsStyle.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    VStack(alignment: .leading) {
+                        LabeledContent("Độ mờ thanh công cụ và thông số", value: "\(Int(session.barFade * 100))%")
+                        Slider(value: $session.barFade, in: 0...0.9)
+                    }
+                    Toggle("Thu gọn thanh công cụ", isOn: $session.barCollapsed)
+                } header: { Text("Thanh công cụ và thông số") } footer: {
+                    Text("Gọn: chỉ chấm màu, khung/s và ping. Thanh thu gọn còn một nút nhỏ ở mép trên, chạm để mở lại.")
+                }
+                .listRowBackground(Theme.card)
+
+                Section {
                     Picker("Chạm vào nền", selection: $session.mode) {
                         ForEach(TouchMode.allCases, id: \.self) { Text($0.title).tag($0) }
                     }
@@ -684,7 +720,6 @@ struct SettingsSheet: View {
                 .listRowBackground(Theme.card)
 
                 Section {
-                    Toggle("Hiện thông số trên màn hình", isOn: $session.showStats)
                     LabeledContent("PC", value: session.host.address)
                     LabeledContent("Mạng", value: session.link.network)
                     LabeledContent("Ping", value: "\(session.link.ping) ms")
@@ -723,9 +758,23 @@ struct KeyEditor: View {
     @State private var floating = true
     @State private var sprint = ""
     @State private var size = 1.0
+    @State private var cursor = false
 
-    private var keysValid: Bool {
-        kind == .key ? !keys.isEmpty : keys.split(separator: ",").count == 4
+    /// Nút theo các ô đang nhập. Giá trị mặc định ghi là nil để file keymap gọn và trang Safari đọc được.
+    private var draft: KeyButton? {
+        guard session.keymap.indices.contains(index) else { return nil }
+        let clean = keys.uppercased().replacingOccurrences(of: " ", with: "")
+        var k = session.keymap[index]
+        k.kind = kind == .stick ? .stick : nil
+        k.keys = clean
+        k.label = label.isEmpty ? (clean.isEmpty ? "Chuột" : clean) : label
+        k.mode = kind == .key && mode != .hold ? mode : nil
+        k.aim = kind == .key && aim ? true : nil
+        k.cursor = kind == .key && cursor ? true : nil
+        k.floating = kind == .stick && !floating ? false : nil
+        k.sprint = kind == .stick && !sprint.isEmpty ? sprint.uppercased() : nil
+        k.size = abs(size - 1) < 0.01 ? nil : size
+        return k
     }
 
     var body: some View {
@@ -741,7 +790,14 @@ struct KeyEditor: View {
                     TextField(kind == .key ? "Phím, ví dụ CTRL+C" : "Lên,Trái,Xuống,Phải — ví dụ W,A,S,D", text: $keys)
                         .textInputAutocapitalization(.characters)
                         .autocorrectionDisabled()
-                } footer: { Text(KeyButton.keyHelp) }
+                } footer: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if draft?.isValid == false && !(keys.isEmpty && kind == .key) {
+                            Text("PC không hiểu tên phím này.").foregroundStyle(.red)
+                        }
+                        Text(KeyButton.keyHelp)
+                    }
+                }
                 .listRowBackground(Theme.card)
 
                 if kind == .key {
@@ -753,8 +809,9 @@ struct KeyEditor: View {
                         }
                         .pickerStyle(.segmented)
                         Toggle("Kéo trên nút để xoay camera", isOn: $aim)
+                        Toggle("Chạm nền = bấm chuột tại chỗ", isOn: $cursor)
                     } header: { Text("Cách bấm") } footer: {
-                        Text("Bật/tắt: chạm một lần là giữ, chạm lại là nhả (ngồi, ngắm, chạy). Liên thanh: giữ là bấm lặp ~15 lần/giây. Kéo để xoay camera: dùng cho nút Bắn, vừa bắn vừa ngắm bằng một ngón.")
+                        Text("Bật/tắt: chạm một lần là giữ, chạm lại là nhả (ngồi, ngắm, chạy). Liên thanh: giữ là bấm lặp ~15 lần/giây. Kéo để xoay camera: dùng cho nút Bắn, vừa bắn vừa ngắm bằng một ngón. Chạm nền = bấm chuột: lúc nút đang bật, chạm vào màn hình là bấm chuột trái đúng chỗ đó (mở túi đồ, bản đồ; Genshin, Star Rail cần giữ ALT).")
                     }
                     .listRowBackground(Theme.card)
                 } else {
@@ -788,7 +845,7 @@ struct KeyEditor: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Huỷ") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Xong") { save(); dismiss() }.disabled(!keysValid)
+                    Button("Xong") { save(); dismiss() }.disabled(draft?.isValid != true)
                 }
             }
             .onAppear(perform: load)
@@ -808,21 +865,10 @@ struct KeyEditor: View {
         floating = k.floating ?? true
         sprint = k.sprint ?? ""
         size = k.scale
+        cursor = k.cursor ?? false
     }
 
-    /// Giá trị mặc định ghi là nil để file keymap gọn và trang Safari đọc được.
     private func save() {
-        guard session.keymap.indices.contains(index) else { return }
-        let clean = keys.uppercased().replacingOccurrences(of: " ", with: "")
-        var k = session.keymap[index]
-        k.kind = kind == .stick ? .stick : nil
-        k.keys = clean
-        k.label = label.isEmpty ? clean : label
-        k.mode = kind == .key && mode != .hold ? mode : nil
-        k.aim = kind == .key && aim ? true : nil
-        k.floating = kind == .stick && !floating ? false : nil
-        k.sprint = kind == .stick && !sprint.isEmpty ? sprint.uppercased() : nil
-        k.size = abs(size - 1) < 0.01 ? nil : size
-        session.keymap[index] = k
+        if let k = draft { session.keymap[index] = k }
     }
 }

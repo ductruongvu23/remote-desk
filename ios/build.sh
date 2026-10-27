@@ -31,7 +31,23 @@ print(next(x["udid"] for r in d if "iOS" in r for x in d[r] if "iPhone" in x["na
   xcrun simctl boot "$UDID" 2>/dev/null || true
   xcrun simctl install "$UDID" build/Debug-iphonesimulator/RemoteDesk.app
   xcrun simctl launch --console "$UDID" vn.vdt.remotedesk --self-test | tee build/selftest.log
-  grep -q "self-test OK" build/selftest.log
+  if ! grep -q "self-test OK" build/selftest.log; then  # in các dòng lỗi (hoặc cuối log nếu app văng) ra chú thích
+    { grep "SELF-TEST" build/selftest.log || tail -15 build/selftest.log; } | head -30 | while IFS= read -r l; do echo "::error::$l"; done
+    sleep 5  # chờ Simulator ghi báo cáo crash
+    crash=$(ls -t ~/Library/Logs/DiagnosticReports/RemoteDesk*.ips 2>/dev/null | head -1 || true)
+    if [ -n "$crash" ]; then  # app văng: loại lỗi và các khung stack của luồng hỏng
+      python3 - "$crash" <<'PY' | while IFS= read -r l; do echo "::error::crash: $l"; done
+import json, sys
+body = json.loads(open(sys.argv[1]).read().split("\n", 1)[1])
+print(json.dumps(body.get("exception", {})), body.get("termination", {}).get("indicator", ""))
+imgs = body.get("usedImages", [])
+for f in body["threads"][body.get("faultingThread", 0)]["frames"][:14]:
+    name = imgs[f["imageIndex"]].get("name", "?") if f.get("imageIndex", -1) < len(imgs) else "?"
+    print(name, f.get("symbol", hex(f.get("imageOffset", 0))), f.get("sourceFile", ""), f.get("sourceLine", ""))
+PY
+    fi
+    exit 1
+  fi
   exit
 fi
 

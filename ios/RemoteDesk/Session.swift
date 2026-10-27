@@ -47,16 +47,29 @@ struct SavedHost: Codable, Identifiable, Hashable {
         return onWiFi ? of(.lan) + of(.tailscale) + of(.internet) : of(.internet) + of(.tailscale) + of(.lan)
     }
 
-    /// LAN/hotspot (10/8, 172.16/12, 192.168/16), Tailscale (100.64/10) hay IP công khai. Tên máy coi như trong nhà.
+    /// LAN/hotspot (10/8, 172.16/12, 192.168/16), Tailscale (100.64/10) hay IP công khai.
+    /// Tên miền (nha.duckdns.org) là đường từ Internet; tên máy trơn hoặc .local coi như trong nhà.
     static func kind(_ addr: String) -> Kind {
-        let p = (addr.split(separator: ":").first ?? "").split(separator: ".").compactMap { Int($0) }
-        guard p.count == 4 else { return .lan }
+        let host = String(addr.split(separator: ":").first ?? "").lowercased()
+        let p = host.split(separator: ".").compactMap { Int($0) }
+        guard p.count == 4 else { return host.contains(".") && !host.hasSuffix(".local") ? .internet : .lan }
         if p[0] == 100 && (64..<128).contains(p[1]) { return .tailscale }
         let lan = p[0] == 10 || p[0] == 127 || (p[0] == 192 && p[1] == 168) || (p[0] == 172 && (16..<32).contains(p[1]))
             || (p[0] == 169 && p[1] == 254)
         return lan ? .lan : .internet
     }
     static func isTailscale(_ addr: String) -> Bool { kind(addr) == .tailscale }
+
+    /// Mã QR trên PC: remotedesk://pair?n=tên&a=ip[:cổng],ip...&c=mã dùng một lần&f=SHA-256 chứng chỉ (hex).
+    /// Lưu mọi địa chỉ (LAN trước) và chứng chỉ đã biết trước, nên lần đầu không phải tin chứng chỉ mù.
+    static func pair(_ url: URL) -> (host: SavedHost, code: String)? {
+        guard url.scheme?.lowercased() == "remotedesk", url.host?.lowercased() == "pair",
+              let q = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return nil }
+        func v(_ k: String) -> String? { q.first { $0.name == k }?.value.flatMap { $0.isEmpty ? nil : $0 } }
+        let addrs = (v("a") ?? "").split(separator: ",").map { normalize(String($0)) }
+        guard let first = addrs.first, let code = v("c") else { return nil }
+        return (SavedHost(name: v("n") ?? first, address: first, certHash: v("f")?.lowercased(), addresses: addrs), code)
+    }
 
     /// "192.168.1.12" -> "192.168.1.12:8443"
     static func normalize(_ s: String) -> String {
@@ -146,6 +159,18 @@ enum GyroMode: String, CaseIterable {
     }
 }
 
+/// Dải thông số trên màn hình: ẩn, gọn (chấm màu, khung/s, ping) hoặc đủ.
+enum StatsStyle: String, CaseIterable {
+    case off, compact, full
+    var title: String {
+        switch self {
+        case .off: return "Ẩn"
+        case .compact: return "Gọn"
+        case .full: return "Đủ"
+        }
+    }
+}
+
 /// Thông số hiện trên màn hình điều khiển.
 struct LinkStats: Equatable {
     var fps = 0, ping = 0
@@ -185,7 +210,9 @@ final class Session: NSObject, ObservableObject, Identifiable, URLSessionWebSock
     @Published var keysHidden = Session.pref("keysHidden", false) { didSet { UserDefaults.standard.set(keysHidden, forKey: "keysHidden") } }
     @Published var keyFade = Session.pref("keyFade", 0.15) { didSet { UserDefaults.standard.set(keyFade, forKey: "keyFade") } }  // độ mờ nút 0...0.9
     @Published var sensitivity = Session.pref("sensitivity", 2.2) { didSet { UserDefaults.standard.set(sensitivity, forKey: "sensitivity") } }
-    @Published var showStats = Session.pref("showStats", true) { didSet { UserDefaults.standard.set(showStats, forKey: "showStats") } }
+    @Published var stats = StatsStyle(rawValue: Session.pref("stats", "full")) ?? .full { didSet { UserDefaults.standard.set(stats.rawValue, forKey: "stats") } }
+    @Published var barFade = Session.pref("barFade", 0.0) { didSet { UserDefaults.standard.set(barFade, forKey: "barFade") } }  // độ mờ thanh công cụ + thông số
+    @Published var barCollapsed = Session.pref("barCollapsed", false) { didSet { UserDefaults.standard.set(barCollapsed, forKey: "barCollapsed") } }
     @Published var lookSens = Session.pref("lookSens", 1.5) { didSet { UserDefaults.standard.set(lookSens, forKey: "lookSens") } }
     @Published var gyro = GyroMode(rawValue: Session.pref("gyro", "off")) ?? .off { didSet { UserDefaults.standard.set(gyro.rawValue, forKey: "gyro") } }
     @Published var gyroSens = Session.pref("gyroSens", 1.0) { didSet { UserDefaults.standard.set(gyroSens, forKey: "gyroSens") } }
@@ -195,6 +222,7 @@ final class Session: NSObject, ObservableObject, Identifiable, URLSessionWebSock
 
     private(set) var host: SavedHost
     private var password: String?  // chỉ giữ trong bộ nhớ tới khi PC cấp khoá thiết bị
+    private var pairCode: String?  // mã dùng một lần trong QR trên PC, thay cho mật khẩu
     var onHostUpdate: ((SavedHost) -> Void)?
     let renderer = VideoRenderer()
     weak var view: StreamUIView?
@@ -211,9 +239,10 @@ final class Session: NSObject, ObservableObject, Identifiable, URLSessionWebSock
     private let path = NWPathMonitor()
     private var onWiFi = true
 
-    init(host: SavedHost, password: String? = nil) {
+    init(host: SavedHost, password: String? = nil, pairCode: String? = nil) {
         self.host = host
         self.password = password
+        self.pairCode = pairCode
         let d = UserDefaults.standard
         var ps = (try? JSONDecoder().decode([KeyProfile].self, from: d.data(forKey: "profiles") ?? Data())) ?? []
         if ps.isEmpty {
@@ -259,6 +288,7 @@ final class Session: NSObject, ObservableObject, Identifiable, URLSessionWebSock
             auth["user"] = host.user ?? ""
             auth["pass"] = password
         }
+        if let pairCode { auth["pair"] = pairCode }
         let msg = (try? JSONSerialization.data(withJSONObject: auth)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         lock.withLock {
             authMsg = msg
@@ -388,10 +418,13 @@ final class Session: NSObject, ObservableObject, Identifiable, URLSessionWebSock
                     trustNext = false
                 }
                 if let addrs, !addrs.isEmpty { host.addresses = addrs }
-                password = nil  // đã có khoá thiết bị: không giữ mật khẩu nữa
+                password = nil  // đã có khoá thiết bị: không giữ mật khẩu, mã QR nữa
+                pairCode = nil
                 onHostUpdate?(host)
             case "badlogin":
                 state = .badLogin
+            case "badpair":
+                state = .ended("Mã QR đã dùng rồi hoặc hết hạn. Bấm \"Ghép bằng mã QR\" trên PC rồi quét lại.")
             case "noaccount":
                 state = .ended("PC chưa có tài khoản. Mở Remote Desk trên PC và bấm \"Tạo tài khoản\".")
             case "locked":

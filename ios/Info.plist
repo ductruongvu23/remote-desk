@@ -9,6 +9,19 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Để tìm và điều khiển PC chạy Remote Desk trong mạng nhà bạn.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Để quét mã QR trên cửa sổ Remote Desk ở PC, không phải nhập địa chỉ IP.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>vn.vdt.remotedesk.pair</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>remotedesk</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
