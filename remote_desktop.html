@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Remote Desktop</title>
+<style>
+  /* Token kiểu Apple "white gallery": rãnh mờ rgba(210,210,215,.64), chữ Ink, thẻ trắng bo 28, xanh #0071e3 cho nút chính */
+  :root { --track: rgba(210,210,215,.64); --track-ink: rgba(0,0,0,.72); --card: #fff; --ink: #1d1d1f; --slate: #707070;
+    --pill: #0071e3; --link: #0066cc; --edit: #0066cc; }
+  @media (prefers-color-scheme: dark) {
+    :root { --track: rgba(66,66,69,.64); --track-ink: rgba(255,255,255,.72); --card: #1d1d1f; --ink: #f5f5f7;
+      --slate: #a1a1a6; --link: #2997ff; --edit: #2997ff; }
+  }
+  * { box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  html, body { margin: 0; height: 100%; background: #000; color: var(--ink); overflow: hidden;
+    font: 14px -apple-system, system-ui, sans-serif; letter-spacing: -0.22px; touch-action: none; }
+  #video { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  #touch { position: fixed; inset: 0; }
+  .glass { background: var(--track); color: var(--track-ink); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
+  #bar { position: fixed; top: max(6px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%);
+    display: flex; gap: 4px; padding: 4px; border-radius: 9999px; z-index: 5; }
+  #bar button { background: none; border: 0; color: var(--track-ink); font: inherit; font-size: 12px; padding: 7px 12px;
+    border-radius: 9999px; }
+  #bar button.on { background: var(--pill); color: #fff; }
+  #hud { position: fixed; left: max(8px, env(safe-area-inset-left)); bottom: 6px; font-size: 12px; letter-spacing: -0.12px;
+    color: #f5f5f7; opacity: .7; z-index: 5; pointer-events: none; }
+  .key { position: absolute; transform: translate(-50%, -50%); min-width: 52px; height: 52px; padding: 0 12px;
+    border-radius: 9999px; display: flex; align-items: center; justify-content: center; font-weight: 600; z-index: 3;
+    opacity: .85; }
+  .key.down { background: var(--pill); color: #fff; opacity: 1; }
+  body.edit .key { outline: 2px solid var(--edit); opacity: 1; }
+  #help { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; z-index: 9; padding: 16px; }
+  #help > div { max-width: 420px; padding: 28px; border-radius: 28px; line-height: 1.47; font-size: 17px; letter-spacing: -0.374px;
+    background: var(--card); color: var(--ink); backdrop-filter: none; -webkit-backdrop-filter: none; }
+  #help a { color: var(--link); text-decoration: none; }
+  #help input { display: block; width: 100%; margin-top: 12px; padding: 10px 20px; border: 1px solid #86868b; border-radius: 980px;
+    background: transparent; color: inherit; font: inherit; -webkit-user-select: text; user-select: text; outline: none; }
+  #help input:focus { border: 2px solid var(--pill); padding: 9px 19px; }
+  #help .err { color: #b64400; font-size: 14px; margin-top: 8px; }
+  #help button { color: #fff; background: var(--pill); border: 0; padding: 8px 16px; border-radius: 9999px;
+    display: inline-block; margin-top: 12px; font: inherit; font-size: 14px; }
+  #kbd { position: fixed; left: -100px; top: 0; width: 10px; height: 10px; opacity: 0; }
+</style>
+</head>
+<body>
+<canvas id="video"></canvas>
+<div id="touch"></div>
+<div id="keys"></div>
+<div id="bar" class="glass">
+  <button id="bMode">Trackpad</button>
+  <button id="bKbd">⌨︎</button>
+  <button id="bEdit">Keymap</button>
+  <button id="bAdd" hidden>＋</button>
+  <button id="bHide">▴</button>
+</div>
+<div id="hud"></div>
+<textarea id="kbd" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
+<div id="help"><div class="glass" id="helpBody"></div></div>
+<script>
+const $ = s => document.querySelector(s);
+const cv = $('#video'), ctx = cv.getContext('2d'), touch = $('#touch'), keysEl = $('#keys');
+const send = m => ws && ws.readyState === 1 && ws.send(JSON.stringify(m));
+const store = { get: k => { try { return localStorage.getItem(k) } catch { return null } },
+                set: (k, v) => { try { localStorage.setItem(k, v) } catch {} } };
+
+const DEFAULT_KEYMAP = [
+  { label: 'Esc', keys: 'ESC', x: .06, y: .2 }, { label: 'Tab', keys: 'TAB', x: .06, y: .32 },
+  { label: 'Win', keys: 'WIN', x: .06, y: .44 }, { label: 'Alt+Tab', keys: 'ALT+TAB', x: .94, y: .2 },
+  { label: 'Copy', keys: 'CTRL+C', x: .94, y: .32 }, { label: 'Paste', keys: 'CTRL+V', x: .94, y: .44 },
+  { label: 'W', keys: 'W', x: .14, y: .62 }, { label: 'A', keys: 'A', x: .07, y: .76 },
+  { label: 'S', keys: 'S', x: .14, y: .88 }, { label: 'D', keys: 'D', x: .21, y: .76 },
+  { label: 'Trái', keys: 'LMB', x: .86, y: .66 }, { label: 'Phải', keys: 'RMB', x: .94, y: .78 },
+  { label: 'Space', keys: 'SPACE', x: .82, y: .88 }, { label: 'Enter', keys: 'ENTER', x: .94, y: .9 },
+];
+let keymap = JSON.parse(store.get('keymap') || 'null') || DEFAULT_KEYMAP;
+
+function help(html) { $('#helpBody').innerHTML = html; $('#help').style.display = html ? 'flex' : 'none'; }
+
+// ---------- Video: WebCodecs, giải mã phần cứng, không đệm (giống Moonlight) ----------
+let ws, dec, ts = 0, needKey = true, frames = 0, rtt = 0, enc = '';
+function codecFromSps(d) {
+  for (let i = 0; i + 7 < d.length; i++)
+    if (d[i] === 0 && d[i + 1] === 0 && d[i + 2] === 1 && (d[i + 3] & 31) === 7)
+      return 'avc1.' + [d[i + 4], d[i + 5], d[i + 6]].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+// Chuỗi codec hvc1 cho WebCodecs, đọc profile/tier/level từ SPS HEVC (NAL 33), bỏ byte chống giả mã 00 00 03.
+function hevcCodec(d) {
+  for (let i = 0; i + 4 < d.length; i++) {
+    if (d[i] !== 0 || d[i + 1] !== 0 || d[i + 2] !== 1 || ((d[i + 3] >> 1) & 63) !== 33) continue;
+    const b = [];
+    for (let j = i + 5; j < d.length && b.length < 13; j++) {
+      if (d[j] === 3 && d[j - 1] === 0 && d[j - 2] === 0) continue;
+      b.push(d[j]);
+    }
+    if (b.length < 13) return;
+    const space = b[1] >> 6, tier = (b[1] >> 5) & 1, profile = b[1] & 31;
+    let compat = ((b[2] << 24) | (b[3] << 16) | (b[4] << 8) | b[5]) >>> 0, rev = 0;
+    for (let k = 0; k < 32; k++) { rev = ((rev << 1) | (compat & 1)) >>> 0; compat >>>= 1; }
+    const cons = b.slice(6, 12);
+    while (cons.length && !cons[cons.length - 1]) cons.pop();
+    return ['hvc1', ['', 'A', 'B', 'C'][space] + profile, rev.toString(16), (tier ? 'H' : 'L') + b[12],
+      ...cons.map(x => x.toString(16).toUpperCase())].join('.');
+  }
+}
+let hevcOK = false;  // Safari giải mã được HEVC thì xin PC phát HEVC (nhẹ băng thông hơn)
+if (window.VideoDecoder) VideoDecoder.isConfigSupported({ codec: 'hvc1.1.6.L123.B0' }).then(r => { hevcOK = !!r.supported; }).catch(() => {});
+function newDecoder(codec) {
+  if (dec && dec.state !== 'closed') dec.close();
+  dec = new VideoDecoder({
+    output: f => {
+      if (cv.width !== f.displayWidth || cv.height !== f.displayHeight) { cv.width = f.displayWidth; cv.height = f.displayHeight; }
+      ctx.drawImage(f, 0, 0); f.close(); frames++;
+    },
+    error: e => { console.warn(e); dec = null; needKey = true; send({ t: 'key' }); },
+  });
+  dec.configure({ codec, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
+}
+function onVideo(buf) {
+  const u = new Uint8Array(buf), key = (u[0] & 1) === 1, hevc = (u[0] & 2) === 2, data = u.subarray(1);  // bit 0 khoá, bit 1 HEVC
+  if (key) { const c = hevc ? hevcCodec(data) : codecFromSps(data); if (c && (!dec || dec.state === 'closed' || dec.codec !== c)) { newDecoder(c); dec.codec = c; } }
+  if (!dec || (needKey && !key)) return;
+  if (!key && dec.decodeQueueSize > 2) { needKey = true; send({ t: 'key' }); return; } // máy chậm: bỏ, xin IDR
+  needKey = false;
+  dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: (ts++) * 16667, data }));
+}
+
+// Đăng nhập bằng tài khoản tạo trên PC. Đúng thì PC cấp khoá thiết bị (lưu ở trình duyệt), lần sau vào thẳng.
+let cred = null;  // tên + mật khẩu vừa gõ, chỉ giữ tới khi có khoá
+function showLogin(err) {
+  help(`<b style="font-size:28px;font-weight:600">Đăng nhập</b>
+    <div style="color:var(--slate);font-size:14px">Tài khoản tạo trên cửa sổ Remote Desk ở PC.</div>
+    ${err ? `<div class="err">${err}</div>` : ''}
+    <form onsubmit="event.preventDefault();login()">
+      <input id="lu" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Tên đăng nhập">
+      <input id="lp" type="password" autocomplete="current-password" placeholder="Mật khẩu">
+      <button type="submit">Đăng nhập</button>
+    </form>`);
+  $('#lu').value = store.get('user') || '';
+  ($('#lu').value ? $('#lp') : $('#lu')).focus();
+}
+function login() {
+  cred = { user: $('#lu').value.trim(), pass: $('#lp').value };
+  if (!cred.user || !cred.pass) return showLogin('Nhập đủ tên và mật khẩu.');
+  store.set('user', cred.user);
+  help('');
+  connect();
+}
+function connect() {
+  if (!window.VideoDecoder) return help(window.isSecureContext
+    ? 'Safari này không có WebCodecs (cần iOS 16.4 trở lên).'
+    : 'Trang phải mở bằng <b>https://</b>.');
+  if (!store.get('token') && !cred) return showLogin();
+  ws = new WebSocket(`wss://${location.host}/ws`);
+  ws.binaryType = 'arraybuffer';
+  let opened = false;
+  ws.onopen = () => {
+    opened = true;
+    ws.send(JSON.stringify({ token: store.get('token') || undefined, user: cred?.user, pass: cred?.pass, hevc: hevcOK }));
+  };
+  ws.onmessage = e => {
+    if (typeof e.data !== 'string') return onVideo(e.data);
+    const m = JSON.parse(e.data);
+    if (m.t === 'badlogin') { store.set('token', ''); cred = null; showLogin('Sai tên đăng nhập hoặc mật khẩu.'); }
+    if (m.t === 'noaccount') help('PC chưa có tài khoản. Mở Remote Desk trên PC và bấm "Tạo tài khoản".<br><button onclick="location.reload()">Thử lại</button>');
+    if (m.t === 'locked') help('Nhập sai quá nhiều lần nên PC tạm khoá. Thử lại sau vài phút.');
+    if (m.t === 'hello') { if (m.token) store.set('token', m.token); cred = null; help(''); needKey = true; if (m.keymap) { keymap = m.keymap; renderKeys(); } }
+    if (m.t === 'pong') { rtt = performance.now() - m.c; enc = `${m.enc} ${m.size[0]}×${m.size[1]}`; }
+  };
+  ws.onclose = e => {
+    if (dec && dec.state !== 'closed') dec.close(); dec = null;
+    if (!opened) help(`Không kết nối được tới PC.<br>Lần đầu cần cài chứng chỉ của PC:<br>
+      1. <a href="/remote.cer">Tải chứng chỉ</a> rồi vào Cài đặt › Đã tải về hồ sơ › Cài đặt.<br>
+      2. Cài đặt › Cài đặt chung › Giới thiệu › Cài đặt tin cậy chứng nhận › bật "RemoteDesk Host".<br>
+      <button onclick="location.reload()">Thử lại</button>`);
+    else if (e.code === 4000 || e.code === 4001) help((e.code === 4000 ? 'Một thiết bị khác đã kết nối.' : 'PC đã ngắt kết nối.') +
+      '<br><button onclick="location.reload()">Kết nối lại</button>');
+    else if (store.get('token')) setTimeout(connect, 1000);
+  };
+}
+setInterval(() => {
+  send({ t: 'ping', c: performance.now() });
+  $('#hud').textContent = ws && ws.readyState === 1 ? `${frames} fps · ${rtt.toFixed(0)} ms · ${enc}` : '';
+  frames = 0;
+}, 1000);
+
+// ---------- Chạm: trackpad (tương đối) hoặc chạm trực tiếp (tuyệt đối) ----------
+let mode = store.get('mode') || 'trackpad', tp = null;
+const SENS = 2.2;
+function videoPoint(t) { // toạ độ chạm -> 0..1 trên hình (trừ phần viền đen)
+  const r = cv.getBoundingClientRect(), s = Math.min(r.width / cv.width, r.height / cv.height);
+  const w = cv.width * s, h = cv.height * s, x0 = (r.width - w) / 2, y0 = (r.height - h) / 2;
+  return { x: Math.min(1, Math.max(0, (t.clientX - x0) / w)), y: Math.min(1, Math.max(0, (t.clientY - y0) / h)) };
+}
+function center(ts_) { let x = 0, y = 0; for (const t of ts_) { x += t.clientX; y += t.clientY; } return { x: x / ts_.length, y: y / ts_.length }; }
+touch.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (mode === 'direct') { if (e.touches.length === 1) { send({ t: 'm', ...videoPoint(e.touches[0]) }); send({ t: 'k', keys: 'LMB', d: 1 }); } return; }
+  if (!tp) tp = { t0: performance.now(), max: 0, moved: 0 };
+  tp.max = Math.max(tp.max, e.touches.length); tp.last = center(e.touches); tp.n = e.touches.length;
+}, { passive: false });
+touch.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (mode === 'direct') return send({ t: 'm', ...videoPoint(e.touches[0]) });
+  const c = center(e.touches);
+  if (e.touches.length !== tp.n) { tp.last = c; tp.n = e.touches.length; return; }
+  const dx = c.x - tp.last.x, dy = c.y - tp.last.y; tp.last = c; tp.moved += Math.abs(dx) + Math.abs(dy);
+  if (e.touches.length === 1) send({ t: 'r', dx: dx * SENS, dy: dy * SENS });
+  else send({ t: 'w', dx: -dx * 4, dy: dy * 4 });
+}, { passive: false });
+touch.addEventListener('touchend', e => {
+  e.preventDefault();
+  if (mode === 'direct') { if (!e.touches.length) send({ t: 'k', keys: 'LMB', d: 0 }); return; }
+  if (e.touches.length) return;
+  if (tp.moved < 10 && performance.now() - tp.t0 < 300) {
+    const b = tp.max >= 2 ? 'RMB' : 'LMB'; send({ t: 'k', keys: b, d: 1 }); send({ t: 'k', keys: b, d: 0 });
+  }
+  tp = null;
+}, { passive: false });
+
+// ---------- Keymap: nút ảo, giữ = giữ phím; chế độ sửa: kéo để dời, chạm để đổi ----------
+let editing = false;
+function renderKeys() {
+  keysEl.innerHTML = '';
+  keymap.forEach((k, i) => {
+    if (k.kind === 'stick') return;  // cần di chuyển chỉ có trong app iPhone
+    const el = document.createElement('div');
+    el.className = 'key glass'; el.textContent = k.label;
+    el.style.left = k.x * 100 + '%'; el.style.top = k.y * 100 + '%';
+    let start;
+    el.addEventListener('touchstart', e => {
+      e.preventDefault(); e.stopPropagation();
+      const t = e.changedTouches[0]; start = { x: t.clientX, y: t.clientY, moved: false };
+      if (!editing) { el.classList.add('down'); send({ t: 'k', keys: k.keys, d: 1 }); }
+    }, { passive: false });
+    el.addEventListener('touchmove', e => {
+      e.preventDefault(); e.stopPropagation();
+      if (!editing) return;
+      const t = e.changedTouches[0];
+      if (Math.abs(t.clientX - start.x) + Math.abs(t.clientY - start.y) > 6) start.moved = true;
+      k.x = t.clientX / innerWidth; k.y = t.clientY / innerHeight;
+      el.style.left = k.x * 100 + '%'; el.style.top = k.y * 100 + '%';
+    }, { passive: false });
+    const up = e => {
+      e.preventDefault(); e.stopPropagation();
+      if (!editing) { el.classList.remove('down'); return send({ t: 'k', keys: k.keys, d: 0 }); }
+      if (!start.moved) editKey(i);
+    };
+    el.addEventListener('touchend', up, { passive: false });
+    el.addEventListener('touchcancel', up, { passive: false });
+    keysEl.appendChild(el);
+  });
+}
+function editKey(i) {
+  const k = keymap[i] || { x: .5, y: .5 };
+  const v = prompt('Nhãn | Phím (vd: Nhảy | SPACE, Copy | CTRL+C, LMB, WHEELUP, F5). Để trống = xoá nút.',
+    k.keys ? `${k.label} | ${k.keys}` : '');
+  if (v === null) return;
+  const [label, keys] = v.split('|').map(s => s.trim());
+  if (!label) keymap.splice(i, 1);
+  else { k.label = label; k.keys = (keys || label).toUpperCase(); keymap[i] = k; }
+  renderKeys();
+}
+function saveKeymap() { store.set('keymap', JSON.stringify(keymap)); send({ t: 'keymap', data: keymap }); }
+
+// ---------- Thanh công cụ ----------
+function setMode(m) { mode = m; store.set('mode', m); $('#bMode').textContent = m === 'direct' ? 'Chạm' : 'Trackpad'; }
+$('#bMode').onclick = () => setMode(mode === 'direct' ? 'trackpad' : 'direct');
+$('#bEdit').onclick = () => {
+  editing = !editing; document.body.classList.toggle('edit', editing);
+  $('#bEdit').classList.toggle('on', editing); $('#bAdd').hidden = !editing;
+  $('#bEdit').textContent = editing ? 'Lưu' : 'Keymap';
+  if (!editing) saveKeymap();
+};
+$('#bAdd').onclick = () => editKey(keymap.length);
+$('#bHide').onclick = () => { keysEl.hidden = !keysEl.hidden; $('#bHide').textContent = keysEl.hidden ? '▾' : '▴'; };
+const kbd = $('#kbd');
+$('#bKbd').onclick = () => kbd.focus();
+kbd.addEventListener('beforeinput', e => {
+  e.preventDefault();
+  const tap = keys => { send({ t: 'k', keys, d: 1 }); send({ t: 'k', keys, d: 0 }); };
+  if (e.inputType === 'deleteContentBackward') tap('BACK');
+  else if (e.inputType === 'insertLineBreak' || e.inputType === 'insertParagraph') tap('ENTER');
+  else if (e.data) send({ t: 'text', s: e.data });
+});
+for (const b of document.querySelectorAll('#bar button')) b.addEventListener('touchstart', e => e.stopPropagation());
+
+setMode(mode); renderKeys(); connect();
+</script>
+</body>
+</html>

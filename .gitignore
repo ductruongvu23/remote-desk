@@ -1,0 +1,11 @@
+# Bí mật và dữ liệu riêng của máy chủ — KHÔNG đưa lên mạng
+remote_account.txt
+remote_devices.txt
+remote_pin.txt
+remote_settings.ini
+remote_keymap.json
+# Bản build
+remote_host.exe
+*.res.o
+ios/build/
+.claude/settings.local.json

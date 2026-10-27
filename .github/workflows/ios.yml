@@ -1,0 +1,25 @@
+name: iOS build
+
+on:
+  push:  # nhánh nào cũng chạy khi đổi app iOS
+    paths: ['ios/**', '.github/workflows/ios.yml']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Chọn Xcode mới nhất (SDK iOS 26 thì có kính lỏng gốc)
+        run: |
+          X=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$X"
+          xcodebuild -version
+      - name: Self-test trên iOS Simulator
+        run: bash ios/build.sh --test
+      - name: Build IPA chưa ký (ký và cài bằng Sideloadly)
+        run: bash ios/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RemoteDesk-ios-unsigned
+          path: ios/build/RemoteDesk-unsigned.ipa

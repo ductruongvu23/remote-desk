@@ -1,0 +1,77 @@
+name: Release
+
+# Đẩy tag phiên bản (vd. git tag v1.0.0 && git push origin v1.0.0) thì build app PC + app iPhone
+# rồi đăng thành một bản Release có sẵn file tải về.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write  # để tạo Release
+
+jobs:
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Chọn Xcode mới nhất
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+      - name: Self-test trên iOS Simulator
+        run: bash ios/build.sh --test
+      - name: Build IPA chưa ký
+        run: bash ios/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios
+          path: ios/build/RemoteDesk-unsigned.ipa
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-gcc
+      # Máy CI không có GPU và màn hình nên không chạy --self-test (cần NVENC và DXGI); self-test chạy trên PC thật.
+      - name: Build remote_host.exe
+        run: bash build_host.sh
+      - name: Gói app PC (exe + trang cho Safari)
+        shell: pwsh
+        run: Compress-Archive -Path remote_host.exe, remote_desktop.html -DestinationPath RemoteDesk-Windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: RemoteDesk-Windows.zip
+
+  release:
+    needs: [ios, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Tạo Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          mv ios/RemoteDesk-unsigned.ipa "RemoteDesk-iOS-$TAG-unsigned.ipa"
+          mv windows/RemoteDesk-Windows.zip "RemoteDesk-Windows-$TAG.zip"
+          cat > notes.md <<EOF
+          ## Remote Desk $TAG
+
+          Điều khiển PC Windows từ iPhone: hình HEVC/H.264 mã hoá bằng card đồ hoạ, độ trễ thấp, keymap cho game.
+
+          **Tải về**
+          - \`RemoteDesk-Windows-$TAG.zip\`: app máy chủ cho PC (giải nén, chạy \`remote_host.exe\`, tạo tài khoản lần đầu). Giữ \`remote_desktop.html\` cùng thư mục.
+          - \`RemoteDesk-iOS-$TAG-unsigned.ipa\`: app iPhone chưa ký. Ký và cài bằng Sideloadly (Apple ID của bạn), hoặc AltStore.
+
+          **Dùng lần đầu**
+          1. Trên PC: mở \`remote_host.exe\`, tạo tài khoản, cho phép qua Windows Firewall.
+          2. Trên iPhone (cùng Wi‑Fi): mở Remote Desk, chọn PC, đăng nhập. Lần sau app tự vào.
+          3. Muốn dùng ở ngoài: bật "Từ Internet" trên cửa sổ PC (cần mở cổng TCP 8443 trên router/modem).
+          EOF
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "Remote Desk $TAG" --notes-file notes.md \
+            "RemoteDesk-iOS-$TAG-unsigned.ipa" "RemoteDesk-Windows-$TAG.zip"
