@@ -14,7 +14,7 @@
 
 ## Dùng lần đầu
 
-1. Trên PC: giải nén `RemoteDesk-Windows-*.zip`, chạy `remote_host.exe`, tạo tài khoản, cho phép qua Windows Firewall.
+1. Trên PC: chạy bộ cài `RemoteDesk-Windows-*-Setup.exe` (không cần quyền quản trị; hoặc giải nén bản zip), mở Remote Desk, tạo tài khoản, cho phép qua Windows Firewall.
 2. Trên iPhone: cài `RemoteDesk-iOS-*-unsigned.ipa` bằng Sideloadly (Apple ID của bạn).
 3. Trên PC bấm **Ghép bằng mã QR**, trên iPhone bấm **Quét mã QR trên PC** (hoặc quét bằng app Camera). Không cần nhập IP hay mật khẩu. Lần sau app tự vào, ở nhà hay ở ngoài.
 
@@ -26,6 +26,6 @@
 
 ## Tự build
 
-- PC (MSYS2 UCRT64, `pacman -S mingw-w64-ucrt-x86_64-gcc`): `bash build_host.sh`, kiểm tra bằng `remote_host.exe --self-test`.
+- PC (MSYS2 UCRT64, `pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-nsis`): `bash build_host.sh`, kiểm tra bằng `remote_host.exe --self-test`; bộ cài: `makensis -DVERSION=1.2.3 installer.nsi`.
 - iPhone (Mac có Xcode 16+): `bash ios/build.sh` ra IPA chưa ký; `bash ios/build.sh --test` chạy self-test trên Simulator. Hoặc mở `ios/RemoteDesk.xcodeproj`, chọn Team rồi Run.
 - Phát hành: `git tag v1.2.3 && git push origin v1.2.3`. GitHub Actions build cả hai và tạo Release.

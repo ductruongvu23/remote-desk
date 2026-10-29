@@ -35,17 +35,21 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
-          install: mingw-w64-ucrt-x86_64-gcc
+          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-nsis
       # Máy CI không có GPU và màn hình nên không chạy --self-test (cần NVENC và DXGI); self-test chạy trên PC thật.
       - name: Build remote_host.exe
         run: bash build_host.sh
       - name: Gói app PC (exe + trang cho Safari)
         shell: pwsh
         run: Compress-Archive -Path remote_host.exe, remote_desktop.html -DestinationPath RemoteDesk-Windows.zip
+      - name: Bộ cài cho PC (NSIS)
+        run: makensis -V2 -DVERSION=${GITHUB_REF_NAME#v} installer.nsi
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: RemoteDesk-Windows.zip
+          path: |
+            RemoteDesk-Windows.zip
+            RemoteDesk-Setup-*.exe
 
   release:
     needs: [ios, windows]
@@ -59,20 +63,22 @@ jobs:
         run: |
           mv ios/RemoteDesk-unsigned.ipa "RemoteDesk-iOS-$TAG-unsigned.ipa"
           mv windows/RemoteDesk-Windows.zip "RemoteDesk-Windows-$TAG.zip"
+          mv windows/RemoteDesk-Setup-*.exe "RemoteDesk-Windows-$TAG-Setup.exe"
           cat > notes.md <<EOF
           ## Remote Desk $TAG
 
           Điều khiển PC Windows từ iPhone: hình HEVC/H.264 mã hoá bằng card đồ hoạ, độ trễ thấp, keymap cho game.
 
           **Tải về**
-          - \`RemoteDesk-Windows-$TAG.zip\`: app máy chủ cho PC (giải nén, chạy \`remote_host.exe\`, tạo tài khoản lần đầu). Giữ \`remote_desktop.html\` cùng thư mục.
+          - \`RemoteDesk-Windows-$TAG-Setup.exe\`: bộ cài cho PC (khuyên dùng). Không cần quyền quản trị, có lối tắt, gỡ trong Cài đặt > Ứng dụng.
+          - \`RemoteDesk-Windows-$TAG.zip\`: bản không cần cài, app máy chủ cho PC (giải nén, chạy \`remote_host.exe\`, tạo tài khoản lần đầu). Giữ \`remote_desktop.html\` cùng thư mục.
           - \`RemoteDesk-iOS-$TAG-unsigned.ipa\`: app iPhone chưa ký. Ký và cài bằng Sideloadly (Apple ID của bạn), hoặc AltStore.
 
           **Dùng lần đầu**
-          1. Trên PC: mở \`remote_host.exe\`, tạo tài khoản, cho phép qua Windows Firewall.
+          1. Trên PC: chạy bộ cài (hoặc giải nén zip) rồi mở Remote Desk, tạo tài khoản, cho phép qua Windows Firewall.
           2. Trên PC bấm "Ghép bằng mã QR", trên iPhone bấm "Quét mã QR trên PC" (hoặc dùng app Camera). Không cần IP hay mật khẩu; lần sau app tự vào, ở nhà hay ở ngoài.
           3. Muốn dùng ở ngoài: bật "Từ Internet" trên cửa sổ PC (cần mở cổng TCP 8443 trên router/modem). Đặt "Tên miền" (DDNS, ví dụ DuckDNS miễn phí) để IP nhà đổi vẫn vào được, và để thêm PC từ xa khi không quét được mã: nhập tên miền + tài khoản.
           4. Keymap có sẵn cho Minecraft, CS2, Valorant, PUBG, Genshin, Star Rail, ZZZ, Wuthering Waves, Roblox, GTA V, MOBA.
           EOF
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "Remote Desk $TAG" --notes-file notes.md \
-            "RemoteDesk-iOS-$TAG-unsigned.ipa" "RemoteDesk-Windows-$TAG.zip"
+            "RemoteDesk-iOS-$TAG-unsigned.ipa" "RemoteDesk-Windows-$TAG-Setup.exe" "RemoteDesk-Windows-$TAG.zip"
