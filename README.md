@@ -3,6 +3,13 @@
 Điều khiển PC Windows từ iPhone, kiểu Moonlight: hình mã hoá bằng card đồ hoạ (HEVC/H.264), độ trễ thấp, keymap cho game.
 Xem và điều khiển được cả iPhone đã jailbreak có cài TrollVNC, từ PC hoặc từ một iPhone khác.
 
+<p align="center">
+  <img src="docs/pc-dang-phat.png" width="640" alt="Cửa sổ Remote Desk trên PC đang phát tới iPhone: 60 khung/s, 1920×1080, mã hoá HEVC bằng card NVIDIA">
+</p>
+<p align="center">
+  <img src="docs/iphone-dieu-khien.png" width="640" alt="App iPhone lúc điều khiển: bảng kính nổi bên trái có nút nhanh và chất lượng hình, nút keymap trên hình">
+</p>
+
 **Tải bản dựng sẵn ở mục [Releases](../../releases)**, không cần build.
 
 ## Gồm những gì
@@ -18,6 +25,26 @@ Xem và điều khiển được cả iPhone đã jailbreak có cài TrollVNC, t
 1. Trên PC: chạy bộ cài `RemoteDesk-Windows-*-Setup.exe` (không cần quyền quản trị; hoặc giải nén bản zip), mở Remote Desk, tạo tài khoản, cho phép qua Windows Firewall.
 2. Trên iPhone: cài `RemoteDesk-iOS-*-unsigned.ipa` bằng Sideloadly (Apple ID của bạn).
 3. Trên PC, trang **Tổng quan**, bấm **Ghép iPhone bằng mã QR**. Trên iPhone bấm **Quét mã QR trên PC** (hoặc nút **+** góc trên, hoặc quét bằng app Camera). Không cần nhập IP hay mật khẩu. Lần sau chỉ cần chạm vào PC trong danh sách, ở nhà hay ở ngoài.
+
+<p align="center">
+  <img src="docs/pc-tong-quan.png" width="520" alt="Trang Tổng quan trên PC: Sẵn sàng kết nối, nút Ghép iPhone bằng mã QR, tài khoản và thiết bị đã đăng nhập">
+  <img src="docs/iphone-ghep.png" width="200" alt="App iPhone lần đầu mở: Ghép PC đầu tiên, nút Quét mã QR trên PC">
+</p>
+
+Các lần sau, mở app là thấy danh sách máy. Chấm xanh nghĩa là PC đang ở cùng mạng; vuốt sang trái để quên một máy.
+
+<p align="center">
+  <img src="docs/iphone-danh-sach.png" width="220" alt="Danh sách máy trên iPhone, bản sáng: PC trong mạng có chấm xanh, PC ở xa, iPhone có TrollVNC">
+  <img src="docs/iphone-danh-sach-toi.png" width="220" alt="Danh sách máy trên iPhone, bản tối">
+</p>
+
+## Chất lượng hình
+
+Đổi độ phân giải, khung hình, bitrate và mã hoá ở trang **Chất lượng hình** trên PC, hoặc trong bảng điều khiển trên iPhone. Đổi là thấy ngay, không phải kết nối lại.
+
+<p align="center">
+  <img src="docs/pc-chat-luong.png" width="520" alt="Trang Chất lượng hình trên PC: độ phân giải, khung hình, bitrate, mã hoá H.264 hoặc HEVC">
+</p>
 
 ## Dùng ở ngoài
 
@@ -36,6 +63,10 @@ Cho iPhone/iPad đã jailbreak và cài [TrollVNC](https://github.com/owngoal-de
 
 - Trên PC: trang **iPhone (TrollVNC)** > **Điều khiển** (PC tự tìm iPhone qua Bonjour). Chuột trái là chạm, chuột phải là nút Home, chuột giữa là nút nguồn, cuộn chuột là vuốt, Ctrl + phím thành Command + phím.
 - Trên một iPhone khác: mục **iPhone (TrollVNC)** trong danh sách, hoặc **+** > **Thêm iPhone (TrollVNC)**. Nút Home, bàn phím và nút nguồn ở nút nhỏ giữa mép trên.
+
+<p align="center">
+  <img src="docs/pc-trollvnc.png" width="520" alt="Trang iPhone (TrollVNC) trên PC: nút Điều khiển và bảng phím chuột tương ứng chạm, nút Home, nút nguồn">
+</p>
 
 ## Cập nhật
 
