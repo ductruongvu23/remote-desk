@@ -9,7 +9,10 @@ struct RemoteDeskApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView().tint(Theme.pill)  // sáng/tối theo Giao diện của iOS
+            Group {  // --demo-stream: chụp ảnh màn điều khiển trên CI (build.sh --test)
+                if CommandLine.arguments.contains("--demo-stream") { DemoStream() } else { ContentView() }
+            }
+            .tint(Theme.pill)  // sáng/tối theo Giao diện của iOS
         }
     }
 }

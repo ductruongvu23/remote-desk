@@ -19,7 +19,9 @@ jobs:
       - name: Self-test trên iOS Simulator
         run: bash ios/build.sh --test
       - name: Build IPA chưa ký
-        run: bash ios/build.sh
+        run: |  # iOS chỉ nhận số và dấu chấm: v1.2.0-beta.1 -> 1.2.0
+          V=${GITHUB_REF_NAME#v}
+          VERSION=${V%%-*} bash ios/build.sh
       - uses: actions/upload-artifact@v4
         with:
           name: ios
@@ -35,10 +37,10 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
-          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-nsis
+          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-nsis mingw-w64-ucrt-x86_64-zlib
       # Máy CI không có GPU và màn hình nên không chạy --self-test (cần NVENC và DXGI); self-test chạy trên PC thật.
       - name: Build remote_host.exe
-        run: bash build_host.sh
+        run: VERSION=${GITHUB_REF_NAME#v} bash build_host.sh
       - name: Gói app PC (exe + trang cho Safari)
         shell: pwsh
         run: Compress-Archive -Path remote_host.exe, remote_desktop.html -DestinationPath RemoteDesk-Windows.zip
@@ -64,6 +66,23 @@ jobs:
           mv ios/RemoteDesk-unsigned.ipa "RemoteDesk-iOS-$TAG-unsigned.ipa"
           mv windows/RemoteDesk-Windows.zip "RemoteDesk-Windows-$TAG.zip"
           mv windows/RemoteDesk-Setup-*.exe "RemoteDesk-Windows-$TAG-Setup.exe"
+          # Nguồn AltStore/SideStore: thêm một lần thì chúng tự cập nhật app iPhone khi có Release mới
+          # (link cố định .../releases/latest/download/altstore.json luôn trỏ tới bản mới nhất)
+          python3 - <<PY
+          import json, os
+          ipa = "RemoteDesk-iOS-$TAG-unsigned.ipa"
+          base = "https://github.com/$GITHUB_REPOSITORY"
+          json.dump({"name": "Remote Desk", "identifier": "vn.vdt.remotedesk.source", "website": base, "apps": [{
+              "name": "Remote Desk", "bundleIdentifier": "vn.vdt.remotedesk", "developerName": "$GITHUB_REPOSITORY_OWNER",
+              "localizedDescription": "Điều khiển PC Windows từ iPhone: hình HEVC độ trễ thấp, keymap cho game, chuyển file, điều khiển iPhone có TrollVNC.",
+              "iconURL": "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/ios/RemoteDesk/Assets.xcassets/AppIcon.appiconset/AppIcon.png",
+              "versions": [{"version": "${TAG#v}", "date": "$(date -u +%Y-%m-%d)", "size": os.path.getsize(ipa),
+                            "downloadURL": base + "/releases/download/$TAG/" + ipa, "minOSVersion": "15.0"}],
+              "appPermissions": {"entitlements": [], "privacy": {
+                  "NSLocalNetworkUsageDescription": "Để tìm và điều khiển PC chạy Remote Desk trong mạng nhà bạn.",
+                  "NSCameraUsageDescription": "Để quét mã QR trên cửa sổ Remote Desk ở PC, không phải nhập địa chỉ IP."}}}],
+              "news": []}, open("altstore.json", "w"), ensure_ascii=False, indent=2)
+          PY
           cat > notes.md <<EOF
           ## Remote Desk $TAG
 
@@ -76,9 +95,12 @@ jobs:
 
           **Dùng lần đầu**
           1. Trên PC: chạy bộ cài (hoặc giải nén zip) rồi mở Remote Desk, tạo tài khoản, cho phép qua Windows Firewall.
-          2. Trên PC bấm "Ghép bằng mã QR", trên iPhone bấm "Quét mã QR trên PC" (hoặc dùng app Camera). Không cần IP hay mật khẩu; lần sau app tự vào, ở nhà hay ở ngoài.
-          3. Muốn dùng ở ngoài: bật "Từ Internet" trên cửa sổ PC (cần mở cổng TCP 8443 trên router/modem). Đặt "Tên miền" (DDNS, ví dụ DuckDNS miễn phí) để IP nhà đổi vẫn vào được, và để thêm PC từ xa khi không quét được mã: nhập tên miền + tài khoản.
+          2. Trên PC (trang Tổng quan) bấm "Ghép iPhone bằng mã QR", trên iPhone bấm "Quét mã QR trên PC" (hoặc nút + góc trên, hoặc app Camera). Không cần IP hay mật khẩu; lần sau chỉ cần chạm vào PC trong danh sách, ở nhà hay ở ngoài.
+          3. Muốn dùng ở ngoài: trang "Truy cập từ xa" của PC, bật "Từ Internet" (cần mở cổng TCP 8443 trên router/modem). Đặt "Tên miền riêng" (DDNS, ví dụ DuckDNS miễn phí) để IP nhà đổi vẫn vào được; ở xa chưa ghép thì trên iPhone bấm + > Thêm PC bằng địa chỉ, nhập tên miền + tài khoản.
           4. Keymap có sẵn cho Minecraft, CS2, Valorant, PUBG, Genshin, Star Rail, ZZZ, Wuthering Waves, Roblox, GTA V, MOBA.
+          5. iPhone đã jailbreak có TrollVNC: xem và điều khiển từ PC (trang "iPhone (TrollVNC)") hoặc từ iPhone khác (+ > Thêm iPhone).
           EOF
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "Remote Desk $TAG" --notes-file notes.md \
-            "RemoteDesk-iOS-$TAG-unsigned.ipa" "RemoteDesk-Windows-$TAG-Setup.exe" "RemoteDesk-Windows-$TAG.zip"
+          # tag có dấu "-" (v1.2.0-beta.1) là bản thử: pre-release, không thành "latest" nên app tự cập nhật bỏ qua
+          PRE=$([[ "$TAG" == *-* ]] && echo --prerelease || true)
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "Remote Desk $TAG" --notes-file notes.md $PRE \
+            "RemoteDesk-iOS-$TAG-unsigned.ipa" "RemoteDesk-Windows-$TAG-Setup.exe" "RemoteDesk-Windows-$TAG.zip" altstore.json

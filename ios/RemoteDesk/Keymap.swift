@@ -246,7 +246,7 @@ extension KeyProfile {
         // GTA V: đi bộ và lái xe chung cần (W ga, S phanh), SPACE nhảy/phanh tay, F lên xe, giữ Tab rồi kéo để chọn súng
         KeyProfile(name: "GTA V", touch: .look, keys: shooter(sprint: "SHIFT").filter { $0.keys != "TAB" } + [
             .init(label: "Cam", keys: "V", x: 0.12, y: 0.09), .init(label: "ĐT", keys: "UP", x: 0.19, y: 0.09),
-            .init(label: "Menu", keys: "M", x: 0.27, y: 0.09),
+            .init(label: "Menu", keys: "M", x: 0.26, y: 0.09),
             .init(label: "Lên xe", keys: "F", x: 0.62, y: 0.6), .init(label: "Nấp", keys: "Q", x: 0.82, y: 0.9),
             .init(label: "Súng", keys: "TAB", x: 0.74, y: 0.36, aim: true),
         ], preset: "GTA V"),

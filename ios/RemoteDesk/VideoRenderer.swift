@@ -17,15 +17,15 @@ final class VideoRenderer {
         layer.backgroundColor = UIColor.black.cgColor
     }
 
-    var videoSize: CGSize { lock.withLock { size } }
+    var videoSize: CGSize { lock.locked { size } }
     /// Số khung và số byte nhận được từ lần gọi trước.
-    func takeCounters() -> (frames: Int, bytes: Int) { lock.withLock { defer { frames = 0; bytes = 0 }; return (frames, bytes) } }
+    func takeCounters() -> (frames: Int, bytes: Int) { lock.locked { defer { frames = 0; bytes = 0 }; return (frames, bytes) } }
 
     /// Gói từ PC: 1 byte cờ (bit 0 = khung khoá, bit 1 = HEVC) + Annex B. Gọi trên một hàng đợi nối tiếp.
     func enqueue(_ packet: Data) {
         let bytes = [UInt8](packet)
         guard bytes.count > 1 else { return }
-        lock.withLock { self.bytes += bytes.count }
+        lock.locked { self.bytes += bytes.count }
         let isKey = bytes[0] & 1 != 0, isHevc = bytes[0] & 2 != 0
         if isHevc != hevc { hevc = isHevc; params = []; format = nil }  // PC đổi codec: dựng lại bộ giải mã
         let (ps, avcc) = Self.split(bytes, from: 1, hevc: hevc)
@@ -33,11 +33,14 @@ final class VideoRenderer {
         if format == nil, !params.isEmpty, let f = Self.makeFormat(params, hevc: hevc) {
             format = f
             let d = CMVideoFormatDescriptionGetDimensions(f)
-            lock.withLock { size = CGSize(width: Int(d.width), height: Int(d.height)) }
+            lock.locked { size = CGSize(width: Int(d.width), height: Int(d.height)) }
         }
-        let renderer = layer.sampleBufferRenderer
-        if renderer.status == .failed || renderer.requiresFlushToResumeDecoding {
-            renderer.flush()
+        // iOS 17 tách phần giải mã ra sampleBufferRenderer; iOS 15–16 gọi thẳng trên layer (cùng chức năng)
+        if #available(iOS 17, *) {
+            let r = layer.sampleBufferRenderer
+            if r.status == .failed || r.requiresFlushToResumeDecoding { r.flush(); waitingKey = true }
+        } else if layer.status == .failed || layer.requiresFlushToResumeDecoding {
+            layer.flush()
             waitingKey = true
         }
         if waitingKey && !isKey {  // khung P thiếu khung gốc sẽ ra hình rác: bỏ, xin PC một khung khoá
@@ -47,8 +50,8 @@ final class VideoRenderer {
         guard let format, !avcc.isEmpty, let sample = Self.sample(avcc, format) else { return }
         waitingKey = false
         askedKey = false
-        renderer.enqueue(sample)
-        lock.withLock { frames += 1 }
+        if #available(iOS 17, *) { layer.sampleBufferRenderer.enqueue(sample) } else { layer.enqueue(sample) }
+        lock.locked { frames += 1 }
     }
 
     /// Tách Annex B: lấy bộ tham số (H.264: SPS, PPS; HEVC: VPS, SPS, PPS) và gói các NAL còn lại sang dạng AVCC

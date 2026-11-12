@@ -469,19 +469,35 @@ struct EditTarget: Identifiable { let id: Int }
 
 struct StreamView: View {
     @ObservedObject var session: Session
+    var demo = false  // ảnh chụp giao diện trên CI: không có PC, giả đang phát, mở sẵn bảng
     var close: () -> Void
     @State private var user = ""
     @State private var pass = ""
-    @State private var showSettings = false
+    @State private var panel = false
+    @State private var pickPhotos = false
+    @State private var pickFiles = false
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .top) {
             Color.black.ignoresSafeArea()
+                .sheet(isPresented: Binding(get: { session.state == .badLogin }, set: { if !$0 && session.state == .badLogin { close() } })) {
+                    LoginSheet(title: "Đăng nhập",
+                               message: "Sai tên hoặc mật khẩu, hoặc PC đã đổi tài khoản. Dùng tài khoản tạo trên cửa sổ Remote Desk ở PC.",
+                               user: $user, pass: $pass) {
+                        session.retry(user: user, password: pass)
+                        pass = ""
+                    } cancel: { close() }
+                }
             StreamCanvas(session: session).ignoresSafeArea()
-            VStack {
-                toolbar.opacity(1 - session.barFade)
+                .sheet(isPresented: $pickPhotos) { PhotoPicker { session.send(files: $0) }.ignoresSafeArea() }
+            // Giữa mép trên để trống (các mẫu keymap chừa chỗ): một nút nhỏ mở bảng, hoặc thanh sửa keymap
+            VStack(spacing: 8) {
+                if session.editing { editBar } else if !panel { handle }  // bảng đang mở: nút mở bảng không ló ra cạnh bảng
+                if let tr = session.transfer {
+                    TransferBadge(transfer: tr) { session.transfer = nil }
+                }
                 Spacer()
-                if session.stats != .off && session.state == .streaming {
+                if session.stats != .off && session.state == .streaming && !panel {  // thông số đã có ở đầu bảng
                     HStack {
                         LinkBadge(link: session.link, compact: session.stats == .compact)
                         Spacer()
@@ -491,20 +507,31 @@ struct StreamView: View {
                 }
             }
             .padding(.horizontal)
-            statusCard
+            if panel {
+                Color.black.opacity(0.3).ignoresSafeArea()
+                    .onTapGesture { show(false) }
+                    .transition(.opacity)
+                HStack(spacing: 0) {
+                    ControlPanel(session: session, close: close, hide: { show(false) },
+                                 keyboard: { show(false); session.view?.toggleKeyboard() },
+                                 photos: { show(false); pickPhotos = true },
+                                 files: { show(false); pickFiles = true },
+                                 edit: { show(false); session.editing = true })
+                    Spacer(minLength: 0)
+                }
+                .ignoresSafeArea(edges: .vertical)
+                .transition(.move(edge: .leading))
+            }
+            statusCard.frame(maxHeight: .infinity)
+        }
+        .fileImporter(isPresented: $pickFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { r in
+            if case .success(let urls) = r { session.send(files: urls.compactMap { try? Files.stage($0) }) }
         }
         .statusBarHidden()
-        .persistentSystemOverlays(.hidden)
-        .defersSystemGestures(on: .all)
+        .gameScreen()
         .sheet(item: Binding(get: { session.editIndex.map(EditTarget.init) }, set: { session.editIndex = $0?.id })) { t in
             KeyEditor(session: session, index: t.id)
         }
-        .alert("Đăng nhập", isPresented: .constant(session.state == .badLogin)) {
-            TextField("Tên đăng nhập", text: $user).textInputAutocapitalization(.never).autocorrectionDisabled()
-            SecureField("Mật khẩu", text: $pass)
-            Button("Đăng nhập") { session.retry(user: user, password: pass); pass = "" }
-            Button("Đóng", role: .cancel, action: close)
-        } message: { Text("Sai tên hoặc mật khẩu, hoặc PC đã đổi tài khoản. Dùng tài khoản tạo trên cửa sổ Remote Desk ở PC.") }
         .alert("Chứng chỉ của PC đã đổi", isPresented: .constant(session.state == .certChanged)) {
             Button("Tin chứng chỉ mới") { session.trustNewCert() }
             Button("Đóng", role: .cancel, action: close)
@@ -514,7 +541,13 @@ struct StreamView: View {
         .onAppear {
             user = session.host.user ?? ""
             UIApplication.shared.isIdleTimerDisabled = true
-            session.connect()
+            if demo {
+                session.state = .streaming
+                session.link = LinkStats(fps: 60, ping: 12, mbps: 18.4, size: "1920×1080", enc: "NVIDIA HEVC", network: "Wi‑Fi")
+                panel = true
+            } else {
+                session.connect()
+            }
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
@@ -522,59 +555,37 @@ struct StreamView: View {
         }
     }
 
-    @ViewBuilder private var toolbar: some View {
-        if session.barCollapsed && !session.editing {
-            barButton("Mở thanh công cụ", "chevron.down") { session.barCollapsed = false }
-                .padding(4)
-                .overlayTrack(22)
-        } else {
-            fullToolbar
+    private func show(_ on: Bool) { withAnimation(.easeOut(duration: 0.22)) { panel = on } }
+
+    /// Nút nổi nhỏ mở bảng điều khiển (như nút Panel của StarDesk), mờ theo cài đặt để không che hình.
+    private var handle: some View {
+        Button { show(true) } label: {
+            Image(systemName: "slider.horizontal.3").font(.system(size: 14, weight: .semibold)).frame(width: 46, height: 28)
         }
+        .foregroundStyle(.primary)
+        .overlayTrack(14)
+        .opacity(1 - session.barFade)
+        .accessibilityLabel("Mở bảng điều khiển")
     }
 
-    private var fullToolbar: some View {
+    /// Lúc sửa keymap: kéo nút để dời, chạm nút để đổi; thanh này chỉ còn thêm nút và xong.
+    private var editBar: some View {
         HStack(spacing: 4) {
-            barButton("Thu gọn thanh công cụ", "chevron.up") { session.barCollapsed = true }
-            Menu {
-                Picker("Hồ sơ keymap", selection: $session.activeID) {
-                    ForEach(session.profiles) { Text($0.name).tag($0.id) }
-                }
-                Picker("Chạm vào nền", selection: $session.mode) {
-                    ForEach(TouchMode.allCases, id: \.self) { Text($0.title).tag($0) }
-                }
-            } label: {
-                Image(systemName: "gamecontroller").font(.system(size: 15, weight: .semibold)).frame(width: 40, height: 36)
-            }
-            .foregroundStyle(Theme.overlayInk)
-            .accessibilityLabel("Hồ sơ keymap: \(session.profileName)")
-            barButton("Bàn phím", "keyboard") { session.view?.toggleKeyboard() }
-            barButton(session.editing ? "Lưu keymap" : "Sửa keymap", session.editing ? "checkmark" : "square.grid.3x3") {
-                session.editing.toggle()
-                if !session.editing { session.saveKeymap() }
-            }
-            if session.editing {
-                barButton("Thêm nút", "plus") {
-                    session.keymap.append(KeyButton(label: "A", keys: "A", x: 0.5, y: 0.5))
-                    session.editIndex = session.keymap.count - 1
-                }
-            }
-            barButton(session.keysHidden ? "Hiện nút" : "Ẩn nút", session.keysHidden ? "eye" : "eye.slash") {
-                session.keysHidden.toggle()
-            }
-            barButton("Cài đặt", "gearshape") { showSettings = true }
-            barButton("Thoát", "xmark", action: close)
+            Button {
+                session.keymap.append(KeyButton(label: "A", keys: "A", x: 0.5, y: 0.5))
+                session.editIndex = session.keymap.count - 1
+            } label: { Label("Thêm nút", systemImage: "plus") }
+            Divider().frame(height: 18)
+            Button {
+                session.editing = false
+                session.saveKeymap()
+            } label: { Label("Xong", systemImage: "checkmark") }
         }
-        .padding(4)
-        .overlayTrack(22)
-        .sheet(isPresented: $showSettings) { SettingsSheet(session: session) }
-    }
-
-    private func barButton(_ title: String, _ icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon).font(.system(size: 15, weight: .semibold)).frame(width: 40, height: 36)
-        }
-        .foregroundStyle(Theme.overlayInk)
-        .accessibilityLabel(title)
+        .font(.text(13, .semibold))
+        .foregroundStyle(.primary)
+        .padding(.horizontal, 14)
+        .frame(height: 34)
+        .overlayTrack(17)
     }
 
     @ViewBuilder private var statusCard: some View {
@@ -587,21 +598,49 @@ struct StreamView: View {
             .foregroundStyle(Theme.ink)
             .padding(.horizontal, 28)
             .padding(.vertical, 20)
-            .card()
+            .glassCard()
         case .failed(let msg), .ended(let msg):
             VStack(spacing: 20) {
                 Text(msg).font(.text(17)).tracking(-0.37).foregroundStyle(Theme.ink).multilineTextAlignment(.center)
                 HStack(spacing: 12) {
-                    Button("Thử lại") { session.retry() }.buttonStyle(BluePill())
-                    Button("Đóng", action: close).buttonStyle(OutlinePill())
+                    Button("Thử lại") { session.retry() }.primaryStyle()
+                    Button("Đóng", action: close).secondaryStyle()
                 }
             }
             .padding(28)
             .frame(maxWidth: 380)
-            .card()
+            .glassCard()
         default:
             EmptyView()
         }
+    }
+}
+
+/// Dải gửi/nhận file: tên, tiến độ, lỗi; file nhận xong có nút Chia sẻ (lưu vào Ảnh, mở bằng app khác).
+struct TransferBadge: View {
+    let transfer: FileTransfer
+    var close: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: transfer.sending ? "arrow.up.circle" : "arrow.down.circle")
+            Text(transfer.name).lineLimit(1).truncationMode(.middle).frame(maxWidth: 200)
+            if let f = transfer.failed {
+                Text(f).foregroundStyle(.red).lineLimit(1)
+            } else if !transfer.finished {
+                ProgressView(value: transfer.progress).frame(width: 80)
+            } else if let url = transfer.saved {
+                Button("Chia sẻ") { Files.share(url) }
+            } else {
+                Text("Đã gửi")
+            }
+            Button(action: close) { Image(systemName: "xmark") }.accessibilityLabel("Đóng")
+        }
+        .font(.text(12, .medium))
+        .foregroundStyle(.primary)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .overlayTrack(16)
     }
 }
 
@@ -622,8 +661,7 @@ struct LinkBadge: View {
             }
         }
         .font(.text(12, .medium).monospacedDigit())
-        .tracking(-0.12)
-        .foregroundStyle(Theme.overlayInk)
+        .foregroundStyle(.primary)
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
         .overlayTrack(16)
@@ -631,119 +669,245 @@ struct LinkBadge: View {
     }
 }
 
-struct SettingsSheet: View {
+/// Bảng điều khiển trượt từ cạnh trái (kiểu Panel của StarDesk): nút nhanh, chất lượng hình, điều khiển, hiển thị.
+/// Tấm kính nổi cách mép, chiếm khoảng 1/3 màn ngang, cuộn được; chạm ra ngoài là đóng.
+struct ControlPanel: View {
     @ObservedObject var session: Session
-    @Environment(\.dismiss) private var dismiss
+    var close: () -> Void
+    var hide: () -> Void
+    var keyboard: () -> Void
+    var photos: () -> Void
+    var files: () -> Void
+    var edit: () -> Void
     @State private var confirmDelete = false
 
+    private static let resolutions = [(1280, "720p"), (1920, "1080p"), (2560, "1440p"), (0, "Gốc")]
+    private static let rates = [30, 60, 90, 120], bitrates = [5, 10, 20, 30, 50]
+
     var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    Picker("Đang dùng", selection: $session.activeID) {
-                        ForEach(session.profiles) { Text($0.name).tag($0.id) }
-                    }
-                    TextField("Tên hồ sơ", text: $session.profileName)
-                    Menu("Thêm hồ sơ từ mẫu") {
-                        ForEach(KeyProfile.presets) { p in Button(p.name) { session.addProfile(from: p) } }
-                    }
-                    Button("Nhân bản hồ sơ này") { session.duplicateProfile() }
-                    if let preset = session.profilePreset {
-                        Button("Khôi phục theo mẫu \"\(preset)\"") { session.resetProfile() }
-                    }
-                    if session.profiles.count > 1 {
-                        Button("Xoá hồ sơ này", role: .destructive) { confirmDelete = true }
-                    }
-                } header: { Text("Hồ sơ keymap theo game") } footer: {
-                    Text("Mỗi game một hồ sơ. Bắt đầu từ mẫu gần giống rồi bỏ bớt nút: chỉ có hai ngón cái, nút càng ít càng dễ bấm.")
+        GeometryReader { g in
+            let shape = RoundedRectangle(cornerRadius: 28, style: .continuous)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    header
+                    actions
+                    quality
+                    controls
+                    display
+                    gyro
+                    connection
                 }
-                .listRowBackground(Theme.card)
-
-                Section {
-                    Toggle("Hiện nút keymap", isOn: Binding(get: { !session.keysHidden }, set: { session.keysHidden = !$0 }))
-                    VStack(alignment: .leading) {
-                        LabeledContent("Độ mờ của nút", value: "\(Int(session.keyFade * 100))%")
-                        Slider(value: $session.keyFade, in: 0...0.9)
-                    }
-                    Button("Sửa keymap (kéo để dời, chạm để đổi)") {
-                        session.editing = true
-                        dismiss()
-                    }
-                } header: { Text("Nút trên màn hình") }
-                .listRowBackground(Theme.card)
-
-                Section {
-                    Picker("Thông số", selection: $session.stats) {
-                        ForEach(StatsStyle.allCases, id: \.self) { Text($0.title).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    VStack(alignment: .leading) {
-                        LabeledContent("Độ mờ thanh công cụ và thông số", value: "\(Int(session.barFade * 100))%")
-                        Slider(value: $session.barFade, in: 0...0.9)
-                    }
-                    Toggle("Thu gọn thanh công cụ", isOn: $session.barCollapsed)
-                } header: { Text("Thanh công cụ và thông số") } footer: {
-                    Text("Gọn: chỉ chấm màu, khung/s và ping. Thanh thu gọn còn một nút nhỏ ở mép trên, chạm để mở lại.")
-                }
-                .listRowBackground(Theme.card)
-
-                Section {
-                    Picker("Chạm vào nền", selection: $session.mode) {
-                        ForEach(TouchMode.allCases, id: \.self) { Text($0.title).tag($0) }
-                    }
-                    VStack(alignment: .leading) {
-                        LabeledContent("Độ nhạy trackpad", value: String(format: "%.1f×", session.sensitivity))
-                        Slider(value: $session.sensitivity, in: 0.5...6, step: 0.1)
-                    }
-                    VStack(alignment: .leading) {
-                        LabeledContent("Độ nhạy camera", value: String(format: "%.1f×", session.lookSens))
-                        Slider(value: $session.lookSens, in: 0.3...6, step: 0.1)
-                    }
-                } header: { Text("Chuột và camera") } footer: {
-                    Text("Độ nhạy camera dùng khi vuốt xoay camera và khi kéo trên nút có \"kéo để xoay camera\". Chạm = chuột phải hợp với game MOBA (bấm phải để đi).")
-                }
-                .listRowBackground(Theme.card)
-
-                Section {
-                    Picker("Con quay", selection: $session.gyro) {
-                        ForEach(GyroMode.allCases, id: \.self) { Text($0.title).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    VStack(alignment: .leading) {
-                        LabeledContent("Độ nhạy con quay", value: String(format: "%.1f×", session.gyroSens))
-                        Slider(value: $session.gyroSens, in: 0.2...4, step: 0.1)
-                    }
-                    Toggle("Đảo trục dọc", isOn: $session.gyroInvertY)
-                } header: { Text("Ngắm bằng con quay (gyro)") } footer: {
-                    Text("Nghiêng và xoay iPhone để xoay camera, chính xác hơn vuốt. \"Khi ngắm\" chỉ bật lúc giữ hoặc bật nút có \"kéo để xoay camera\" (ví dụ nút Ngắm). Ngồi trên xe đang chạy thì nên tắt.")
-                }
-                .listRowBackground(Theme.card)
-
-                Section {
-                    LabeledContent("PC", value: session.host.address)
-                    LabeledContent("Mạng", value: session.link.network)
-                    LabeledContent("Ping", value: "\(session.link.ping) ms")
-                    LabeledContent("Khung hình", value: "\(session.link.fps) khung/s")
-                    LabeledContent("Băng thông", value: String(format: "%.1f Mbps", session.link.mbps))
-                    LabeledContent("Độ phân giải", value: session.link.size)
-                    LabeledContent("Bộ mã hoá", value: session.link.enc)
-                } header: { Text("Kết nối") } footer: {
-                    Text("Màn hình PC đứng yên thì khung/s thấp là bình thường. Đổi độ phân giải, fps, bitrate trên cửa sổ PC.")
-                }
-                .listRowBackground(Theme.card)
+                .padding(14)
             }
-            .scrollContentBackground(.hidden)
-            .background(Theme.band)
-            .navigationTitle("Cài đặt")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Xong") { dismiss() } } }
-            .confirmationDialog("Xoá hồ sơ \"\(session.profileName)\"?", isPresented: $confirmDelete, titleVisibility: .visible) {
-                Button("Xoá hồ sơ", role: .destructive) { session.deleteProfile() }
-            }
+            .frame(width: min(360, max(300, g.size.width * 0.42)))
+            .clipShape(shape)
+            .glass(shape)
+            .padding(.leading, 10)  // nổi cách mép; HStack cha đã chừa phần tai thỏ
+            .padding(.vertical, 10)
         }
-        .presentationDetents([.medium, .large])
-        .presentationCornerRadius(28)
     }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(session.host.name).font(.display(17)).foregroundStyle(Theme.ink).lineLimit(1)
+                HStack(spacing: 6) {
+                    Circle().fill([Color.green, .yellow, .red][session.link.quality]).frame(width: 7, height: 7)
+                    Text("\(session.link.fps) khung/s · \(session.link.ping) ms · \(session.link.network)").lineLimit(1)
+                }
+                .font(.text(11).monospacedDigit()).foregroundStyle(Theme.slate)
+            }
+            Spacer(minLength: 0)
+            Button(action: hide) { Image(systemName: "xmark").font(.system(size: 13, weight: .bold)).frame(width: 30, height: 30) }
+                .foregroundStyle(Theme.slate)
+                .background(Theme.fill, in: Circle())
+                .accessibilityLabel("Đóng bảng")
+        }
+    }
+
+    private var actions: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 4), spacing: 6) {
+            tile("Bàn phím", "keyboard", action: keyboard)
+            tile("Gửi ảnh", "photo.on.rectangle", action: photos)
+            tile("Gửi tệp", "folder", action: files)
+            tile(session.keysHidden ? "Hiện phím" : "Ẩn phím", session.keysHidden ? "eye" : "eye.slash") { session.keysHidden.toggle() }
+            tile("Sửa keymap", "square.grid.3x3", action: edit)
+            tile("Thông số: \(session.stats.title)", "speedometer") {
+                let all = StatsStyle.allCases
+                session.stats = all[(all.firstIndex(of: session.stats)! + 1) % all.count]
+            }
+            tile("Ngắt", "power", tint: .red, action: close)
+        }
+    }
+
+    private func tile(_ title: String, _ icon: String, tint: Color = Theme.ink, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 5) {
+                Image(systemName: icon).font(.system(size: 17, weight: .medium))
+                Text(title).font(.text(11, .medium)).lineLimit(1).minimumScaleFactor(0.75)
+            }
+            .foregroundStyle(tint)
+            .frame(maxWidth: .infinity, minHeight: 58)
+            .background(Theme.fill, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .accessibilityLabel(title)
+    }
+
+    private var quality: some View {
+        PanelSection("Chất lượng hình") {
+            segment("Độ phân giải", Self.resolutions.map(\.1), Self.resolutions.firstIndex { $0.0 == session.quality.width }) {
+                session.setQuality(width: Self.resolutions[$0].0)
+            }
+            segment("Khung hình", Self.rates.map(String.init), Self.rates.firstIndex(of: session.quality.fps)) {
+                session.setQuality(fps: Self.rates[$0])
+            }
+            segment("Bitrate (Mbps)", Self.bitrates.map(String.init), Self.bitrates.firstIndex(of: session.quality.mbps)) {
+                session.setQuality(mbps: Self.bitrates[$0])
+            }
+            segment("Mã hoá", ["H.264", "HEVC"], session.quality.hevc ? 1 : 0) { session.setQuality(hevc: $0 == 1) }
+            Note("Đổi là PC phát lại ngay. Hình giật, trễ thì hạ bitrate hoặc độ phân giải.")
+        }
+    }
+
+    /// Hàng chọn kiểu phân đoạn; nil = PC đang dùng mức không có trong danh sách.
+    private func segment(_ title: String, _ items: [String], _ selected: Int?, set: @escaping (Int) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title).font(.text(12)).foregroundStyle(Theme.slate)
+            Picker(title, selection: Binding(get: { selected ?? -1 }, set: set)) {
+                ForEach(items.indices, id: \.self) { Text(items[$0]).tag($0) }
+            }
+            .pickerStyle(.segmented)
+        }
+    }
+
+    private var controls: some View {
+        PanelSection("Điều khiển") {
+            Menu {
+                Picker("Hồ sơ", selection: $session.activeID) {
+                    ForEach(session.profiles) { Text($0.name).tag($0.id) }
+                }
+                Menu("Thêm hồ sơ từ mẫu") {
+                    ForEach(KeyProfile.presets) { p in Button(p.name) { session.addProfile(from: p) } }
+                }
+                Button("Nhân bản hồ sơ này") { session.duplicateProfile() }
+                if let preset = session.profilePreset {
+                    Button("Khôi phục theo mẫu \"\(preset)\"") { session.resetProfile() }
+                }
+                if session.profiles.count > 1 {
+                    Button("Xoá hồ sơ này", role: .destructive) { confirmDelete = true }
+                }
+            } label: {
+                MenuRow(title: "Hồ sơ keymap", value: session.profileName)
+            }
+            TextField("Tên hồ sơ", text: $session.profileName).font(.text(13)).textFieldStyle(.roundedBorder)
+            Menu {
+                Picker("Chạm vào nền", selection: $session.mode) {
+                    ForEach(TouchMode.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+            } label: {
+                MenuRow(title: "Chạm vào nền", value: session.mode.title)
+            }
+            SliderRow(title: "Độ nhạy trackpad", value: String(format: "%.1f×", session.sensitivity), v: $session.sensitivity, range: 0.5...6)
+            SliderRow(title: "Độ nhạy camera", value: String(format: "%.1f×", session.lookSens), v: $session.lookSens, range: 0.3...6)
+        }
+        .confirmationDialog("Xoá hồ sơ \"\(session.profileName)\"?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Xoá hồ sơ", role: .destructive) { session.deleteProfile() }
+        }
+    }
+
+    private var display: some View {
+        PanelSection("Hiển thị") {
+            Toggle("Nút keymap", isOn: Binding(get: { !session.keysHidden }, set: { session.keysHidden = !$0 })).font(.text(13))
+            SliderRow(title: "Độ mờ nút", value: "\(Int(session.keyFade * 100))%", v: $session.keyFade, range: 0...0.9)
+            segment("Thông số trên màn hình", StatsStyle.allCases.map(\.title), StatsStyle.allCases.firstIndex(of: session.stats)) {
+                session.stats = StatsStyle.allCases[$0]
+            }
+            SliderRow(title: "Độ mờ nút nổi và thông số", value: "\(Int(session.barFade * 100))%", v: $session.barFade, range: 0...0.9)
+        }
+    }
+
+    private var gyro: some View {
+        PanelSection("Ngắm bằng con quay") {
+            segment("Con quay", GyroMode.allCases.map(\.title), GyroMode.allCases.firstIndex(of: session.gyro)) {
+                session.gyro = GyroMode.allCases[$0]
+            }
+            SliderRow(title: "Độ nhạy", value: String(format: "%.1f×", session.gyroSens), v: $session.gyroSens, range: 0.2...4)
+            Toggle("Đảo trục dọc", isOn: $session.gyroInvertY).font(.text(13))
+        }
+    }
+
+    private var connection: some View {
+        PanelSection("Kết nối") {
+            Group {
+                LabeledRow("PC", value: session.current)
+                LabeledRow("Hình", value: "\(session.link.size) · \(session.link.enc)")
+                LabeledRow("Băng thông", value: String(format: "%.1f Mbps", session.link.mbps))
+                LabeledRow("Phiên bản app", value: AppUpdate.current)
+            }
+            .font(.text(12))
+            Note("File PC gửi xuống: app Tệp > Trên iPhone > Remote Desk > Nhận từ PC. File gửi lên: Tải về" + "\\" + "Remote Desk trên PC.")
+        }
+    }
+}
+
+/// Một nhóm trong bảng điều khiển: tiêu đề, nền xám trong bo 18 trên tấm kính.
+struct PanelSection<Content: View>: View {
+    let title: String
+    let content: Content
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title).font(.text(13, .semibold)).foregroundStyle(Theme.ink)
+            content
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.fill, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+}
+
+struct SliderRow: View {
+    let title: String
+    let value: String
+    @Binding var v: Double
+    let range: ClosedRange<Double>
+
+    var body: some View {
+        VStack(spacing: 2) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(value).monospacedDigit().foregroundStyle(Theme.slate)
+            }
+            .font(.text(12))
+            Slider(value: $v, in: range)
+        }
+    }
+}
+
+struct MenuRow: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack {
+            Text(title).foregroundStyle(Theme.ink)
+            Spacer()
+            Text(value).foregroundStyle(Theme.link).lineLimit(1)
+            Image(systemName: "chevron.up.chevron.down").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.link)
+        }
+        .font(.text(13))
+    }
+}
+
+struct Note: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+    var body: some View { Text(text).font(.text(11)).foregroundStyle(Theme.slate).fixedSize(horizontal: false, vertical: true) }
 }
 
 struct KeyEditor: View {
@@ -778,7 +942,7 @@ struct KeyEditor: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationView {
             Form {
                 Section {
                     Picker("Loại", selection: $kind) {
@@ -798,7 +962,6 @@ struct KeyEditor: View {
                         Text(KeyButton.keyHelp)
                     }
                 }
-                .listRowBackground(Theme.card)
 
                 if kind == .key {
                     Section {
@@ -813,7 +976,6 @@ struct KeyEditor: View {
                     } header: { Text("Cách bấm") } footer: {
                         Text("Bật/tắt: chạm một lần là giữ, chạm lại là nhả (ngồi, ngắm, chạy). Liên thanh: giữ là bấm lặp ~15 lần/giây. Kéo để xoay camera: dùng cho nút Bắn, vừa bắn vừa ngắm bằng một ngón. Chạm nền = bấm chuột: lúc nút đang bật, chạm vào màn hình là bấm chuột trái đúng chỗ đó (mở túi đồ, bản đồ; Genshin, Star Rail cần giữ ALT).")
                     }
-                    .listRowBackground(Theme.card)
                 } else {
                     Section {
                         Toggle("Cần nổi", isOn: $floating)
@@ -823,12 +985,11 @@ struct KeyEditor: View {
                     } header: { Text("Cần di chuyển") } footer: {
                         Text("Cần nổi: đặt ngón đâu gần cần cũng được, tâm cần dời theo ngón (dễ cho người mới). Tắt đi thì tâm cố định, bấm lệch là đi ngay (cho người đã quen).")
                     }
-                    .listRowBackground(Theme.card)
                 }
 
                 Section {
                     VStack(alignment: .leading) {
-                        LabeledContent("Kích thước", value: "\(Int(size * 100))%")
+                        LabeledRow("Kích thước", value: "\(Int(size * 100))%")
                         Slider(value: $size, in: 0.6...2, step: 0.1)
                     }
                     Button("Xoá nút", role: .destructive) {
@@ -836,10 +997,7 @@ struct KeyEditor: View {
                         dismiss()
                     }
                 }
-                .listRowBackground(Theme.card)
             }
-            .scrollContentBackground(.hidden)
-            .background(Theme.band)
             .navigationTitle("Sửa nút")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -850,8 +1008,8 @@ struct KeyEditor: View {
             }
             .onAppear(perform: load)
         }
-        .presentationDetents([.medium, .large])
-        .presentationCornerRadius(28)
+        .navigationViewStyle(.stack)
+        .sheetStyle()
     }
 
     private func load() {

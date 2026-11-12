@@ -1,7 +1,8 @@
 #!/bin/bash
-# Build app iPhone Remote Desk (cần Mac có Xcode 16 trở lên).
+# Build app iPhone Remote Desk (cần Mac có Xcode 26 trở lên: SDK iOS 26 cho kính lỏng).
 #   bash ios/build.sh          -> ios/build/RemoteDesk-unsigned.ipa (ký và cài bằng Sideloadly như WDA.ipa)
 #   bash ios/build.sh --test   -> chạy self-test trên iOS Simulator
+#   VERSION=1.2.0 bash ios/build.sh -> ghi số phiên bản vào app (app so với GitHub Release để báo bản mới)
 # Ký bằng Apple ID trong Xcode: mở ios/RemoteDesk.xcodeproj, chọn Team ở Signing & Capabilities,
 # cắm iPhone rồi bấm Run, hoặc Product > Archive > Distribute App để xuất .ipa.
 set -euo pipefail
@@ -48,11 +49,38 @@ PY
     fi
     exit 1
   fi
+  # Ảnh chụp giao diện để soát (sáng, tối): danh sách trống; có máy (PC đã lưu nạp qua tham số, PC và iPhone giả
+  # quảng bá Bonjour trên máy Mac này); màn điều khiển xoay ngang mở sẵn bảng. Tải về ở artifact RemoteDesk-ios-screenshots.
+  mkdir -p build/shots
+  shot() {  # tên ảnh, rồi tham số cho app
+    local name=$1
+    shift
+    xcrun simctl launch "$UDID" vn.vdt.remotedesk ${1+"$@"} > /dev/null
+    sleep 6
+    xcrun simctl io "$UDID" screenshot "build/shots/$name.png" > /dev/null 2>&1 || true
+    xcrun simctl terminate "$UDID" vn.vdt.remotedesk 2>/dev/null || true
+  }
+  for mode in light dark; do
+    xcrun simctl ui "$UDID" appearance $mode
+    shot "empty-$mode"
+  done
+  hosts=$(printf '%s' '[{"name":"MAY-CHOI-GAME","address":"192.168.0.102:8443"},{"name":"PC văn phòng","address":"nha.duckdns.org:8443"}]' | xxd -p | tr -d '\n')
+  dns-sd -R "MAY-CHOI-GAME" _remotedesk._tcp local 8443 > /dev/null 2>&1 &
+  b1=$!
+  dns-sd -R "TrollVNC-1a2b3c4d" _rfb._tcp local 5901 > /dev/null 2>&1 &
+  b2=$!
+  sleep 2
+  for mode in light dark; do
+    xcrun simctl ui "$UDID" appearance $mode
+    shot "home-$mode" -hosts "<$hosts>"
+    shot "stream-$mode" --demo-stream
+  done
+  kill $b1 $b2 2>/dev/null || true
   exit
 fi
 
 xcb -quiet -project RemoteDesk.xcodeproj -target RemoteDesk -configuration Release -sdk iphoneos \
-  SYMROOT="$PWD/build" CODE_SIGNING_ALLOWED=NO build
+  SYMROOT="$PWD/build" CODE_SIGNING_ALLOWED=NO ${VERSION:+MARKETING_VERSION=$VERSION} build
 mkdir -p build/ipa/Payload
 cp -R build/Release-iphoneos/RemoteDesk.app build/ipa/Payload/
 (cd build/ipa && zip -qr ../RemoteDesk-unsigned.ipa Payload)

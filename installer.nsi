@@ -1,10 +1,12 @@
 ﻿; Bộ cài Remote Desk cho PC (NSIS 3, gói mingw-w64-ucrt-x86_64-nsis của MSYS2).
-;   bash build_host.sh && makensis -DVERSION=1.1.0 installer.nsi   ->  RemoteDesk-Setup-1.1.0.exe
+;   VERSION=1.2.0 bash build_host.sh && makensis -DVERSION=1.2.0 installer.nsi   ->  RemoteDesk-Setup-1.2.0.exe
+; App tự cập nhật bằng cách chạy bộ cài mới: RemoteDesk-Setup.exe /S /R /D=<thư mục đang cài> (/R: cài xong mở lại app).
 ; Cài cho người dùng hiện tại, không cần quyền quản trị, vào %LOCALAPPDATA%\Programs\Remote Desk:
 ; app ghi tài khoản, khoá thiết bị và cài đặt cạnh file exe nên không cài vào Program Files (chỉ đọc).
 ; File phải lưu UTF-8 có BOM: không có BOM thì makensis đọc theo bảng mã ANSI, chữ tiếng Việt vỡ.
 Unicode true
 !include MUI2.nsh
+!include FileFunc.nsh
 
 !ifndef VERSION
   !define VERSION "dev"
@@ -73,6 +75,15 @@ Section "Remote Desk (bắt buộc)" SecMain
   WriteRegDWORD HKCU "${UNINST}" "NoModify" 1
   WriteRegDWORD HKCU "${UNINST}" "NoRepair" 1
 SectionEnd
+
+; Tự cập nhật chạy im lặng với /R: cài xong mở lại Remote Desk để iPhone ở xa vẫn vào được
+Function .onInstSuccess
+  ${GetParameters} $0
+  ClearErrors
+  ${GetOptions} $0 "/R" $1
+  IfErrors +2
+  Exec '"$INSTDIR\remote_host.exe"'
+FunctionEnd
 
 Section "Lối tắt trên màn hình nền" SecDesktop
   CreateShortcut "$DESKTOP\${APP}.lnk" "$INSTDIR\remote_host.exe"

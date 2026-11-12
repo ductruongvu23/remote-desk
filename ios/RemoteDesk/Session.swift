@@ -92,10 +92,12 @@ final class HostStore: ObservableObject {
 final class Discovery: ObservableObject {
     @Published var found: [NWBrowser.Result] = []
     private var browser: NWBrowser?
+    private let type: String
+    init(type: String = "_remotedesk._tcp") { self.type = type }  // "_rfb._tcp": iPhone bật TrollVNC
 
     func start() {
         guard browser == nil else { return }
-        let b = NWBrowser(for: .bonjour(type: "_remotedesk._tcp", domain: nil), using: .tcp)
+        let b = NWBrowser(for: .bonjour(type: type, domain: nil), using: .tcp)
         b.browseResultsChangedHandler = { [weak self] results, _ in self?.found = Array(results) }
         b.start(queue: .main)
         browser = b
@@ -171,6 +173,12 @@ enum StatsStyle: String, CaseIterable {
     }
 }
 
+/// Chất lượng hình PC đang phát (đổi được từ bảng điều khiển trên iPhone). width 0 = độ phân giải gốc.
+struct StreamQuality: Equatable {
+    var width = 1920, fps = 60, mbps = 20
+    var hevc = true
+}
+
 /// Thông số hiện trên màn hình điều khiển.
 struct LinkStats: Equatable {
     var fps = 0, ping = 0
@@ -193,6 +201,7 @@ final class Session: NSObject, ObservableObject, Identifiable, URLSessionWebSock
     @Published var link = LinkStats()
     @Published var editing = false
     @Published var editIndex: Int?
+    @Published var transfer: FileTransfer?  // shortcut: chỉ hiện lần gửi/nhận mới nhất, đủ cho một người dùng
     // Hồ sơ keymap theo game; hồ sơ đang dùng quyết định nút và kiểu chạm. Lưu trên iPhone.
     @Published var profiles: [KeyProfile] { didSet { UserDefaults.standard.set(try? JSONEncoder().encode(profiles), forKey: "profiles") } }
     @Published var activeID: UUID {
@@ -212,7 +221,8 @@ final class Session: NSObject, ObservableObject, Identifiable, URLSessionWebSock
     @Published var sensitivity = Session.pref("sensitivity", 2.2) { didSet { UserDefaults.standard.set(sensitivity, forKey: "sensitivity") } }
     @Published var stats = StatsStyle(rawValue: Session.pref("stats", "full")) ?? .full { didSet { UserDefaults.standard.set(stats.rawValue, forKey: "stats") } }
     @Published var barFade = Session.pref("barFade", 0.0) { didSet { UserDefaults.standard.set(barFade, forKey: "barFade") } }  // độ mờ thanh công cụ + thông số
-    @Published var barCollapsed = Session.pref("barCollapsed", false) { didSet { UserDefaults.standard.set(barCollapsed, forKey: "barCollapsed") } }
+    @Published var quality = StreamQuality()  // PC báo lại mỗi giây trong pong
+    private var qualityHold = 0.0
     @Published var lookSens = Session.pref("lookSens", 1.5) { didSet { UserDefaults.standard.set(lookSens, forKey: "lookSens") } }
     @Published var gyro = GyroMode(rawValue: Session.pref("gyro", "off")) ?? .off { didSet { UserDefaults.standard.set(gyro.rawValue, forKey: "gyro") } }
     @Published var gyroSens = Session.pref("gyroSens", 1.0) { didSet { UserDefaults.standard.set(gyroSens, forKey: "gyroSens") } }
@@ -237,6 +247,8 @@ final class Session: NSObject, ObservableObject, Identifiable, URLSessionWebSock
     private var candidates: [String] = [], attempt = 0
     private(set) var current = ""  // địa chỉ đang dùng
     private let path = NWPathMonitor()
+    private var sendQueue: [URL] = [], sending = false
+    private var progressObs: NSKeyValueObservation?
     private var onWiFi = true
 
     init(host: SavedHost, password: String? = nil, pairCode: String? = nil) {
@@ -290,7 +302,7 @@ final class Session: NSObject, ObservableObject, Identifiable, URLSessionWebSock
         }
         if let pairCode { auth["pair"] = pairCode }
         let msg = (try? JSONSerialization.data(withJSONObject: auth)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-        lock.withLock {
+        lock.locked {
             authMsg = msg
             lastCandidate = last
         }
@@ -323,7 +335,7 @@ final class Session: NSObject, ObservableObject, Identifiable, URLSessionWebSock
 
     /// Người dùng đồng ý tin chứng chỉ mới của PC (PC đổi IP thì tự tạo chứng chỉ khác).
     func trustNewCert() {
-        lock.withLock { trustNext = true }
+        lock.locked { trustNext = true }
         connect()
     }
 
@@ -334,6 +346,17 @@ final class Session: NSObject, ObservableObject, Identifiable, URLSessionWebSock
 
     func send(text: String, on t: URLSessionWebSocketTask? = nil) {
         (t ?? task)?.send(.string(text)) { _ in }
+    }
+
+    /// Đổi chất lượng hình trên PC (chỉ gửi mục đổi); PC áp dụng, lưu và phát lại ngay như bấm trên cửa sổ PC.
+    func setQuality(width: Int? = nil, fps: Int? = nil, mbps: Int? = nil, hevc: Bool? = nil) {
+        var m: [String: Any] = ["t": "quality"]
+        if let width { quality.width = width; m["w"] = width }
+        if let fps { quality.fps = fps; m["fps"] = fps }
+        if let mbps { quality.mbps = mbps; m["mbps"] = mbps }
+        if let hevc { quality.hevc = hevc; m["hevc"] = hevc ? 1 : 0 }
+        qualityHold = CACurrentMediaTime() + 2.5  // pong cũ còn trên đường về thì đừng nhảy ngược lựa chọn
+        send(m)
     }
 
     func tapKey(_ keys: String) {
@@ -407,13 +430,14 @@ final class Session: NSObject, ObservableObject, Identifiable, URLSessionWebSock
         guard let d = s.data(using: .utf8), let m = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
               let type = m["t"] as? String else { return }
         let c = m["c"] as? Double, e = m["enc"] as? String, sz = m["size"] as? [Int], addrs = m["addrs"] as? [String]
+        let fileID = m["id"] as? String, fileName = m["name"] as? String, q = m["q"] as? [Int]
         if type == "hello", let tok = m["token"] as? String, tok.count == 64 { Keychain.set(host.address, tok) }  // vừa đăng nhập
         if type == "badlogin" { Keychain.delete(host.address) }  // khoá cũ bị thu hồi (PC đổi tài khoản / đăng xuất hết)
         DispatchQueue.main.async { [self] in
             switch type {
             case "hello":
                 state = .streaming
-                lock.withLock {
+                lock.locked {
                     if let h = seenHash { host.certHash = h; pinnedHash = h }
                     trustNext = false
                 }
@@ -429,10 +453,16 @@ final class Session: NSObject, ObservableObject, Identifiable, URLSessionWebSock
                 state = .ended("PC chưa có tài khoản. Mở Remote Desk trên PC và bấm \"Tạo tài khoản\".")
             case "locked":
                 state = .ended("Nhập sai quá nhiều lần nên PC tạm khoá địa chỉ này. Thử lại sau vài phút.")
+            case "file":  // PC gửi file: tự tải về Tệp > Remote Desk > Nhận từ PC
+                if let fileID, let fileName { receive(id: fileID, name: fileName) }
             case "pong":
                 if let c { link.ping = Int(CACurrentMediaTime() * 1000 - c) }
                 link.enc = e ?? ""
                 if let sz, sz.count == 2 { link.size = "\(sz[0])×\(sz[1])" }
+                if let q, q.count == 4, CACurrentMediaTime() > qualityHold {
+                    let now = StreamQuality(width: q[0], fps: q[1], mbps: q[2], hevc: q[3] != 0)
+                    if now != quality { quality = now }
+                }
             default: break
             }
         }
@@ -462,10 +492,89 @@ final class Session: NSObject, ObservableObject, Identifiable, URLSessionWebSock
         }
     }
 
+    // MARK: chuyển file (mỗi file một kết nối HTTPS tới PC, cùng địa chỉ và chứng chỉ đã ghim với phiên)
+
+    /// Gửi file sang PC (lưu ở Tải về\Remote Desk). Các file đã chép sẵn vào thư mục tạm, gửi lần lượt, xong thì xoá.
+    func send(files: [URL]) {
+        sendQueue += files
+        if !sending { nextUpload() }
+    }
+
+    private func request(_ path: String, _ query: String, _ value: String) -> URLRequest? {
+        guard let tok = Keychain.get(host.address), var c = URLComponents(string: "https://\(current)\(path)") else { return nil }
+        c.queryItems = [URLQueryItem(name: query, value: value)]
+        guard let url = c.url else { return nil }
+        var req = URLRequest(url: url)
+        req.setValue(tok, forHTTPHeaderField: "X-Token")
+        return req
+    }
+
+    private func nextUpload() {
+        guard !sendQueue.isEmpty else { sending = false; return }
+        sending = true
+        let file = sendQueue.removeFirst()
+        let name = file.lastPathComponent
+        guard var req = request("/upload", "name", name) else {
+            transfer = FileTransfer(name: name, sending: true, failed: "Chưa đăng nhập PC")
+            return nextUpload()
+        }
+        req.httpMethod = "POST"
+        transfer = FileTransfer(name: name, sending: true)
+        let t = urlSession.uploadTask(with: req, fromFile: file) { [weak self] _, resp, err in
+            try? FileManager.default.removeItem(at: file.deletingLastPathComponent())  // thư mục tạm của Files.stage
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if code == 200 {
+                    self.transfer?.progress = 1
+                    let shown = self.transfer  // gửi xong thì tự ẩn dải sau vài giây
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 4) { if self.transfer == shown { self.transfer = nil } }
+                }
+                else { self.transfer?.failed = err?.localizedDescription ?? "PC không nhận file (mã \(code))" }
+                self.nextUpload()
+            }
+        }
+        watch(t)
+        t.resume()
+    }
+
+    private func receive(id: String, name: String) {
+        let name = Files.safeName(name)
+        guard let req = request("/file", "id", id) else { return }
+        transfer = FileTransfer(name: name, sending: false)
+        let t = urlSession.downloadTask(with: req) { [weak self] tmp, resp, err in
+            // file tạm bị xoá ngay khi hàm này trả về: phải dời đi ở đây
+            var saved: URL?, failed: String?
+            if let tmp, (resp as? HTTPURLResponse)?.statusCode == 200 {
+                do {
+                    try FileManager.default.createDirectory(at: Files.inbox, withIntermediateDirectories: true)
+                    let dst = Files.unique(Files.inbox, name)
+                    try FileManager.default.moveItem(at: tmp, to: dst)
+                    saved = dst
+                } catch { failed = error.localizedDescription }
+            } else {
+                failed = err?.localizedDescription ?? "PC không gửi được file"
+            }
+            DispatchQueue.main.async {
+                self?.transfer?.saved = saved
+                self?.transfer?.failed = failed
+                if saved != nil { self?.transfer?.progress = 1 }
+            }
+        }
+        watch(t)
+        t.resume()
+    }
+
+    private func watch(_ t: URLSessionTask) {
+        progressObs = t.progress.observe(\.fractionCompleted) { [weak self] p, _ in
+            DispatchQueue.main.async { if self?.transfer?.finished == false { self?.transfer?.progress = min(p.fractionCompleted, 0.99) } }
+        }
+    }
+
     // MARK: URLSessionWebSocketDelegate
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
-        send(text: lock.withLock { authMsg }, on: webSocketTask)
+        send(text: lock.locked { authMsg }, on: webSocketTask)
     }
 
     /// PC dùng chứng chỉ tự ký: tin theo kiểu "lần đầu" (như SSH), sau đó chỉ nhận đúng chứng chỉ đã nhớ.
@@ -476,7 +585,7 @@ final class Session: NSObject, ObservableObject, Identifiable, URLSessionWebSock
               let leaf = (SecTrustCopyCertificateChain(trust) as? [SecCertificate])?.first
         else { return completionHandler(.performDefaultHandling, nil) }
         let hash = SHA256.hash(data: SecCertificateCopyData(leaf) as Data).map { String(format: "%02x", $0) }.joined()
-        let (ok, last): (Bool, Bool) = lock.withLock {
+        let (ok, last): (Bool, Bool) = lock.locked {
             guard pinnedHash == nil || pinnedHash == hash || trustNext else { return (false, lastCandidate) }
             seenHash = hash
             return (true, lastCandidate)

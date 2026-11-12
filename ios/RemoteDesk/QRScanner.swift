@@ -2,6 +2,7 @@ import SwiftUI
 import VisionKit
 
 /// Quét mã QR trên cửa sổ Remote Desk ở PC (VisionKit, iPhone XS trở lên). Thấy mã remotedesk:// là trả về ngay.
+@available(iOS 16.0, *)  // iOS 15: quét bằng app Camera, iOS mở app qua remotedesk://
 struct QRScanner: UIViewControllerRepresentable {
     var found: (URL) -> Void
 

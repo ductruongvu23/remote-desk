@@ -1,5 +1,7 @@
 import CoreMedia
+import SwiftUI
 import UIKit
+import zlib
 import Foundation
 
 /// Kiểm tra nhanh phần không cần mạng: tách H.264, dựng định dạng từ SPS/PPS thật của NVENC, keymap.
@@ -68,16 +70,16 @@ enum SelfTest {
         check(fire?.mode == .turbo && fire?.aim == true && fire?.scale == 1.5, "đọc nút liên thanh + kéo để ngắm")
 
         // Địa chỉ: Wi‑Fi thử LAN trước, 4G thử Tailscale trước, không trùng lặp
-        let pc = SavedHost(name: "PC", address: "192.168.0.103:8443", addresses: ["192.168.0.103:8443", "100.99.115.103:8443"])
-        check(pc.candidates(onWiFi: true) == ["192.168.0.103:8443", "100.99.115.103:8443"], "thứ tự trên Wi‑Fi")
-        check(pc.candidates(onWiFi: false) == ["100.99.115.103:8443", "192.168.0.103:8443"], "thứ tự trên 4G")
+        let pc = SavedHost(name: "PC", address: "192.168.0.103:8443", addresses: ["192.168.0.103:8443", "100.100.1.2:8443"])
+        check(pc.candidates(onWiFi: true) == ["192.168.0.103:8443", "100.100.1.2:8443"], "thứ tự trên Wi‑Fi")
+        check(pc.candidates(onWiFi: false) == ["100.100.1.2:8443", "192.168.0.103:8443"], "thứ tự trên 4G")
         check(SavedHost.isTailscale("100.64.0.1:8443") && !SavedHost.isTailscale("100.128.0.1") && !SavedHost.isTailscale("10.0.0.1"),
               "dải Tailscale")
         let out = SavedHost(name: "PC", address: "192.168.0.103:8443",
-                            addresses: ["192.168.0.103:8443", "14.162.162.13:8443", "100.99.115.103:8443"])
-        check(out.candidates(onWiFi: false).first == "14.162.162.13:8443" && out.candidates(onWiFi: true).last == "14.162.162.13:8443",
+                            addresses: ["192.168.0.103:8443", "203.0.113.7:8443", "100.100.1.2:8443"])
+        check(out.candidates(onWiFi: false).first == "203.0.113.7:8443" && out.candidates(onWiFi: true).last == "203.0.113.7:8443",
               "IP công khai: 4G thử trước, Wi‑Fi thử sau cùng")
-        check(SavedHost.kind("172.20.10.2:8443") == .lan && SavedHost.kind("14.162.162.13:8443") == .internet
+        check(SavedHost.kind("172.20.10.2:8443") == .lan && SavedHost.kind("203.0.113.7:8443") == .internet
               && SavedHost.kind("my-pc.local:8443") == .lan && SavedHost.kind("Nha.DuckDNS.org:8443") == .internet
               && SavedHost.kind("mypc:8443") == .lan, "phân loại địa chỉ")
 
@@ -102,7 +104,7 @@ enum SelfTest {
         check(KeyProfile.presets.count >= 15 && Set(KeyProfile.presets.map(\.name)).count == KeyProfile.presets.count, "đủ mẫu, không trùng tên")
         print("self-test: xong keymap, kiểm bố cục \(KeyProfile.presets.count) mẫu")
         // Mỗi mẫu: phím PC hiểu được; nút không chồng nhau, không nằm dưới thanh công cụ, không lòi ra ngoài (iPhone 11 Pro Max nằm ngang)
-        let screen = CGRect(x: 0, y: 0, width: 896, height: 414), bar = CGRect(x: 448 - 165, y: 0, width: 330, height: 48)
+        let screen = CGRect(x: 0, y: 0, width: 896, height: 414), bar = CGRect(x: 448 - 180, y: 0, width: 360, height: 48)
         for p in KeyProfile.presets {
             for k in p.keys where !k.isValid { check(false, "\(p.name): phím \"\(k.keys)\" của nút \(k.label)") }
             let rects = p.keys.filter { !$0.isStick }.map { k -> CGRect in
@@ -121,15 +123,140 @@ enum SelfTest {
 
         print("self-test: xong bố cục")
         // Mã QR trên PC: địa chỉ thiếu cổng thì thêm 8443, chứng chỉ ghi sẵn để khỏi hỏi tin
-        let qr = URL(string: "remotedesk://pair?n=DESKTOP-1&a=192.168.0.103,14.162.162.13:9000&c=0123abcd&f=AABB")!
+        let qr = URL(string: "remotedesk://pair?n=DESKTOP-1&a=192.168.0.103,203.0.113.7:9000&c=0123abcd&f=AABB")!
         let pr = SavedHost.pair(qr)
-        check(pr?.host.address == "192.168.0.103:8443" && pr?.host.addresses == ["192.168.0.103:8443", "14.162.162.13:9000"]
+        check(pr?.host.address == "192.168.0.103:8443" && pr?.host.addresses == ["192.168.0.103:8443", "203.0.113.7:9000"]
               && pr?.code == "0123abcd" && pr?.host.certHash == "aabb" && pr?.host.name == "DESKTOP-1", "đọc mã QR")
         check(SavedHost.pair(URL(string: "remotedesk://pair?a=1.2.3.4")!) == nil && SavedHost.pair(URL(string: "https://x/pair?a=1&c=2")!) == nil,
               "mã QR thiếu mã hoặc sai loại")
 
+        // Chuyển file và cập nhật
+        check(AppUpdate.newer("v1.10.0", than: "1.9.2") && !AppUpdate.newer("v1.2.0", than: "1.2.0") && !AppUpdate.newer("1.1", than: "1.2"),
+              "so phiên bản")
+        check(Files.safeName("../../x/a.txt") == "a.txt" && Files.safeName("..") == "file" && Files.safeName(" ") == "file"
+              && Files.safeName("C:\\a\\b.pdf") == "b.pdf", "tên file nhận")
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("st-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: tmp.appendingPathComponent("a.jpg").path, contents: Data())
+        check(Files.unique(tmp, "a.jpg").lastPathComponent == "a (1).jpg" && Files.unique(tmp, "b").lastPathComponent == "b", "tên trùng")
+        let staged = try? Files.stage(tmp.appendingPathComponent("a.jpg"))
+        check(staged?.lastPathComponent == "a.jpg" && staged.map { FileManager.default.fileExists(atPath: $0.path) } == true, "chép file tạm để gửi")
+        let src = AppUpdate.addSource("altstore")?.absoluteString ?? ""
+        check(src.hasPrefix("altstore://source?url=") && src.contains("altstore.json"), "link nguồn AltStore: \(src)")
+
+        // TrollVNC: độ dài compact, xác thực VNC (vector tính bằng Python), phím, địa chỉ, và giải mã Tight: một màu,
+        // zlib nối luồng qua nhiều ô và sau khi reset luồng, bảng màu 1 bit, gradient, JPEG (giống self-test của bản PC)
+        func reader(_ d: [UInt8]) -> (VNCRead, () -> Int) {
+            var pos = 0
+            return ({ n in
+                guard pos + n <= d.count else { throw VNCError.lost }
+                defer { pos += n }
+                return Array(d[pos..<pos + n])
+            }, { pos })
+        }
+        var (rd, at) = reader([0x90, 0x4E, 0x05])
+        check((try? TightDecoder.length(rd)) == 10000 && at() == 2, "độ dài compact 2 byte")
+        (rd, at) = reader([0xFF, 0xFF, 0x01])
+        check((try? TightDecoder.length(rd)) == 0x7FFF && at() == 3, "độ dài compact 3 byte")
+        check(VNCClient.auth("trollvnc", Array(0..<16))?.map { String(format: "%02x", $0) }.joined() == "f274f5a243dfda6253d8eb67f74a554c",
+              "xác thực VNC (DES)")
+        check(VNCClient.keys(for: "A").map { $0 == (0x61, true) } == true && VNCClient.keys(for: ":").map { $0 == (0x3B, true) } == true
+              && VNCClient.keys(for: "a").map { $0 == (0x61, false) } == true && VNCClient.keys(for: "\n").map { $0 == (0xFF0D, false) } == true
+              && VNCClient.keys(for: "đ") == nil, "phím gõ sang iPhone")
+        check(VNCTarget.normalize(" 192.168.0.101 ") == "192.168.0.101:5901" && VNCTarget.isSelf("127.0.0.1:5901")
+              && !VNCTarget.isSelf("8.8.8.8:5901"), "địa chỉ iPhone, chặn tự điều khiển chính máy")
+        let zp = (0..<2).map { _ -> UnsafeMutablePointer<z_stream> in
+            let p = UnsafeMutablePointer<z_stream>.allocate(capacity: 1)
+            p.initialize(to: z_stream())
+            deflateInit_(p, 6, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
+            return p
+        }
+        func zsync(_ id: Int, _ raw: [UInt8]) -> [UInt8] {  // như máy chủ: nén tiếp luồng cũ, đẩy ra bằng Z_SYNC_FLUSH
+            var inp = raw, out = [UInt8](repeating: 0, count: raw.count + 64)
+            let used = inp.withUnsafeMutableBufferPointer { i in
+                out.withUnsafeMutableBufferPointer { o -> Int in
+                    zp[id].pointee.next_in = i.baseAddress
+                    zp[id].pointee.avail_in = uInt(i.count)
+                    zp[id].pointee.next_out = o.baseAddress
+                    zp[id].pointee.avail_out = uInt(o.count)
+                    deflate(zp[id], Z_SYNC_FLUSH)
+                    return o.count - Int(zp[id].pointee.avail_out)
+                }
+            }
+            return Array(out[..<used])
+        }
+        func clen(_ n: Int) -> [UInt8] {
+            n <= 0x7F ? [UInt8(n)] : n <= 0x3FFF ? [UInt8(n & 0x7F | 0x80), UInt8(n >> 7)]
+                : [UInt8(n & 0x7F | 0x80), UInt8(n >> 7 & 0x7F | 0x80), UInt8(n >> 14)]
+        }
+        func rgbPx(_ rgb: [UInt8]) -> [UInt32] {
+            stride(from: 0, to: rgb.count, by: 3).map { 0xFF00_0000 | UInt32(rgb[$0]) << 16 | UInt32(rgb[$0 + 1]) << 8 | UInt32(rgb[$0 + 2]) }
+        }
+        let tight = TightDecoder()
+        (rd, at) = reader([0x80, 10, 20, 30])
+        check((try? tight.rect(rd, w: 3, h: 2)) == [UInt32](repeating: 0xFF0A_141E, count: 6), "Tight: một màu")
+        var rgb = (0..<36).map { UInt8(truncatingIfNeeded: $0 * 7) }
+        for k in 0..<3 {  // ô 2 nối tiếp luồng của ô 1; trước ô 3 máy chủ reset luồng 0 rồi nén lại từ đầu
+            if k == 2 {
+                deflateEnd(zp[0])
+                zp[0].pointee = z_stream()
+                deflateInit_(zp[0], 6, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
+            }
+            let z = zsync(0, rgb), msg = [UInt8(k == 2 ? 1 : 0)] + clen(z.count) + z
+            (rd, at) = reader(msg)
+            check((try? tight.rect(rd, w: 4, h: 3)) == rgbPx(rgb) && at() == msg.count, "Tight: zlib ô \(k + 1)")
+            rgb = rgb.map { $0 &+ 3 }
+        }
+        let c0: UInt32 = 0xFF01_0203, c1: UInt32 = 0xFFC8_C9CA
+        (rd, at) = reader([0x40, 1, 1, 1, 2, 3, 200, 201, 202, 0b1010_0000, 0b0100_0000, 0, 0b1000_0000])
+        check((try? tight.rect(rd, w: 10, h: 2)) == [c1, c0, c1, c0, c0, c0, c0, c0, c0, c1, c0, c0, c0, c0, c0, c0, c0, c0, c1, c0],
+              "Tight: bảng 2 màu")
+        var res = [UInt8](repeating: 0, count: 18)
+        res[0] = 10
+        res[1] = 20
+        res[2] = 30
+        let gz = zsync(1, res)
+        (rd, at) = reader([0x50, 2] + clen(gz.count) + gz)
+        check((try? tight.rect(rd, w: 3, h: 2)) == [UInt32](repeating: 0xFF0A_141E, count: 6), "Tight: gradient")
+        let jpg = hex("ffd8ffe000104a46494600010100000100010000ffdb0043000302020302020303030304030304050805050404050a070706080c0a0c0c0b0a0b0b0d0e12"
+                      + "100d0e110e0b0b1016101113141515150c0f171816141812141514ffdb00430103040405040509050509140d0b0d14141414141414141414141414141414"
+                      + "14141414141414141414141414141414141414141414141414141414141414141414ffc00011080008001003012200021101031101ffc4001500010100000000"
+                      + "000000000000000000000004ffc40014100100000000000000000000000000000000ffc4001501010100000000000000000000000000000708ffc4001411010000"
+                      + "0000000000000000000000000000ffda000c03010002110311003f0090007a907fffd9")
+        (rd, at) = reader([0x90] + clen(jpg.count) + jpg)
+        let jp = (try? tight.rect(rd, w: 16, h: 8)) ?? []
+        check(jp.count == 128 && jp.allSatisfy { abs(Int($0 >> 16 & 255) - 200) < 6 && abs(Int($0 >> 8 & 255) - 100) < 6 && abs(Int($0 & 255) - 50) < 6 },
+              "Tight: JPEG")
+        (rd, at) = reader([0xA0])
+        check((try? tight.rect(rd, w: 4, h: 4)) == nil, "Tight: PNG (không xin) bị từ chối")
+        for p in zp {
+            deflateEnd(p)
+            p.deallocate()
+        }
+
+        // Danh sách máy: PC đã lưu và PC đang thấy trong mạng cùng tên gộp thành một dòng
+        let ms = Machine<SavedHost, String>.merge([SavedHost(name: "PC-A", address: "1.2.3.4:8443"), SavedHost(name: "PC-B", address: "b:8443")],
+                                                 ["PC-B", "PC-C"], name: \.name, address: \.address, foundName: { $0 })
+        check(ms.map(\.name) == ["PC-A", "PC-B", "PC-C"] && ms[0].found == nil && ms[1].found == "PC-B" && ms[2].saved == nil
+              && ms[2].id == "mdns:PC-C" && ms[0].id == "1.2.3.4:8443", "gộp PC đã lưu với PC trong mạng")
+
         print(failed == 0 ? "self-test OK" : "self-test LỖI: \(failed)")
         usleep(300_000)  // cho simctl --console kịp đọc dòng cuối trước khi app thoát
         exit(failed == 0 ? 0 : 1)
+    }
+}
+
+/// Ảnh chụp giao diện trên CI (build.sh --test): màn điều khiển xoay ngang, bảng mở sẵn, không cần PC.
+struct DemoStream: View {
+    @StateObject private var session = Session(host: SavedHost(name: "MAY-CHOI-GAME", address: "192.168.0.102:8443"))
+
+    var body: some View {
+        StreamView(session: session, demo: true) {}
+            .onAppear {
+                if #available(iOS 16, *) {
+                    (UIApplication.shared.connectedScenes.first as? UIWindowScene)?
+                        .requestGeometryUpdate(.iOS(interfaceOrientations: .landscapeRight))
+                }
+            }
     }
 }
